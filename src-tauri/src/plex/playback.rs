@@ -1,5 +1,10 @@
 //! Resolve Plex album/track metadata into playable stream URLs.
+//!
+//! WebKit rejects many direct .m4b URLs because Plex serves them as
+//! `application/octet-stream` (HTMLMediaElement error code 4). We therefore
+//! use the Plex universal transcoder to deliver progressive `audio/mpeg`.
 
+use super::client::client_identifier;
 use super::models::{PlaybackInfo, PlaybackTrack};
 use super::server::{connect, ServerSession};
 use crate::error::{AppError, AppResult};
@@ -8,6 +13,7 @@ use serde_json::Value;
 /// Build a playable playlist for a book (album) or single track ratingKey.
 pub async fn get_playback(server_id: &str, rating_key: &str) -> AppResult<PlaybackInfo> {
     let session = connect(server_id).await?;
+    let client_id = client_identifier()?;
     let meta = fetch_metadata(&session, rating_key).await?;
 
     let meta_type = meta
@@ -17,11 +23,9 @@ pub async fn get_playback(server_id: &str, rating_key: &str) -> AppResult<Playba
         .to_ascii_lowercase();
 
     let track_nodes: Vec<Value> = match meta_type.as_str() {
-        // Album / book container → child tracks
         "album" => {
             let children = fetch_children(&session, rating_key).await?;
             if children.is_empty() {
-                // Some single-file books expose Media on the album itself
                 if has_playable_media(&meta) {
                     vec![meta]
                 } else {
@@ -33,9 +37,7 @@ pub async fn get_playback(server_id: &str, rating_key: &str) -> AppResult<Playba
                 children
             }
         }
-        // Direct track
         "track" | "episode" => vec![meta],
-        // Fallback: try children, else self
         _ => {
             let children = fetch_children(&session, rating_key).await.unwrap_or_default();
             if !children.is_empty() {
@@ -52,7 +54,7 @@ pub async fn get_playback(server_id: &str, rating_key: &str) -> AppResult<Playba
 
     let mut tracks: Vec<PlaybackTrack> = Vec::new();
     for (i, node) in track_nodes.into_iter().enumerate() {
-        if let Some(t) = map_track(&node, &session, i as u32) {
+        if let Some(t) = map_track(&node, &session, &client_id, i as u32) {
             tracks.push(t);
         }
     }
@@ -98,11 +100,11 @@ async fn fetch_children(session: &ServerSession, rating_key: &str) -> AppResult<
 }
 
 fn has_playable_media(meta: &Value) -> bool {
-    extract_part_key(meta).is_some()
+    extract_part_info(meta).is_some()
 }
 
-fn extract_part_key(meta: &Value) -> Option<(String, Option<String>, Option<u64>)> {
-    // Media[] → Part[] with key
+/// Returns (part_key, container, duration_ms)
+fn extract_part_info(meta: &Value) -> Option<(String, Option<String>, Option<u64>)> {
     let media = meta.get("Media")?.as_array()?;
     for m in media {
         let parts = m.get("Part")?.as_array()?;
@@ -124,20 +126,35 @@ fn extract_part_key(meta: &Value) -> Option<(String, Option<String>, Option<u64>
     None
 }
 
-fn map_track(meta: &Value, session: &ServerSession, index: u32) -> Option<PlaybackTrack> {
-    let (part_key, container, part_duration) = extract_part_key(meta)?;
+fn map_track(
+    meta: &Value,
+    session: &ServerSession,
+    client_id: &str,
+    index: u32,
+) -> Option<PlaybackTrack> {
+    let (_part_key, _container, part_duration) = extract_part_info(meta)?;
     let rating_key = meta
         .get("ratingKey")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    if rating_key.is_empty() {
+        return None;
+    }
     let title = meta
         .get("title")
         .and_then(|v| v.as_str())
         .unwrap_or("Track")
         .to_string();
     let duration_ms = part_duration.or_else(|| meta.get("duration").and_then(|v| v.as_u64()));
-    let url = absolute_part_url(&session.base_uri, &part_key, &session.token);
+
+    // Transcode to progressive MP3 — correct Content-Type for WebKit / HTML5 audio.
+    let url = transcode_mp3_url(
+        &session.base_uri,
+        &rating_key,
+        &session.token,
+        client_id,
+    );
 
     Some(PlaybackTrack {
         rating_key,
@@ -145,24 +162,57 @@ fn map_track(meta: &Value, session: &ServerSession, index: u32) -> Option<Playba
         index,
         duration_ms,
         url,
-        container,
+        container: Some("mp3".into()),
     })
 }
 
-fn absolute_part_url(base_uri: &str, part_key: &str, token: &str) -> String {
+/// Universal transcoder → progressive MP3 (verified against PMS).
+fn transcode_mp3_url(base_uri: &str, track_rating_key: &str, token: &str, client_id: &str) -> String {
     let base = base_uri.trim_end_matches('/');
-    if part_key.starts_with("http://") || part_key.starts_with("https://") {
-        let sep = if part_key.contains('?') { '&' } else { '?' };
-        if part_key.contains("X-Plex-Token=") {
-            return part_key.to_string();
+    let session = uuid::Uuid::new_v4();
+    let path = format!("/library/metadata/{track_rating_key}");
+
+    // Keep param order stable; encode values.
+    let q = [
+        ("hasMDE", "1".to_string()),
+        ("path", path),
+        ("mediaIndex", "0".to_string()),
+        ("partIndex", "0".to_string()),
+        ("protocol", "http".to_string()),
+        ("fastSeek", "1".to_string()),
+        ("directPlay", "0".to_string()),
+        ("directStream", "0".to_string()),
+        ("location", "lan".to_string()),
+        ("maxAudioBitrate", "320".to_string()),
+        ("session", session.to_string()),
+        ("copyType", "transcode".to_string()),
+        ("audioCodec", "mp3".to_string()),
+        ("X-Plex-Client-Identifier", client_id.to_string()),
+        ("X-Plex-Product", "RogueAudio".to_string()),
+        ("X-Plex-Platform", "Chrome".to_string()),
+        ("X-Plex-Platform-Version", "120.0".to_string()),
+        ("X-Plex-Device", "RogueAudio".to_string()),
+        ("X-Plex-Device-Name", "RogueAudio".to_string()),
+        ("X-Plex-Token", token.to_string()),
+    ]
+    .into_iter()
+    .map(|(k, v)| format!("{}={}", k, encode_component(&v)))
+    .collect::<Vec<_>>()
+    .join("&");
+
+    format!("{base}/music/:/transcode/universal/start.mp3?{q}")
+}
+
+fn encode_component(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 2);
+    for b in s.as_bytes() {
+        match *b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char);
+            }
+            b'/' => out.push_str("%2F"),
+            _ => out.push_str(&format!("%{b:02X}")),
         }
-        return format!("{part_key}{sep}X-Plex-Token={token}");
     }
-    let path = if part_key.starts_with('/') {
-        part_key.to_string()
-    } else {
-        format!("/{part_key}")
-    };
-    // download=1 can help some clients; streaming usually works without.
-    format!("{base}{path}?X-Plex-Token={token}&download=0")
+    out
 }

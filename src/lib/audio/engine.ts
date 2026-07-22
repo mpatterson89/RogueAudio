@@ -57,32 +57,51 @@ export class Html5AudioEngine implements AudioEngine {
   }
 
   async load(url: string, _headers?: Record<string, string>): Promise<void> {
-    // Token is in the query string (set by Rust). Custom headers cannot be set
-    // on HTMLAudioElement in a webview.
+    // Token / transcoder params are in the query string (set by Rust).
+    // Custom headers cannot be set on HTMLAudioElement in a webview.
     await new Promise<void>((resolve, reject) => {
-      const onReady = () => {
+      let settled = false;
+      const settle = (fn: () => void) => {
+        if (settled) return;
+        settled = true;
         cleanup();
-        resolve();
+        fn();
       };
-      const onError = () => {
-        cleanup();
-        const code = this.audio.error?.code;
-        const msg = this.audio.error?.message || `media error code ${code ?? "?"}`;
-        reject(new Error(`Failed to load audio: ${msg}`));
-      };
+      const onReady = () => settle(() => resolve());
+      const onError = () =>
+        settle(() => {
+          const code = this.audio.error?.code;
+          // 1=aborted 2=network 3=decode 4=src not supported
+          const hints: Record<number, string> = {
+            1: "aborted",
+            2: "network error",
+            3: "decode error",
+            4: "format/MIME not supported",
+          };
+          const hint = code ? hints[code] || `code ${code}` : "unknown";
+          reject(new Error(`Failed to load audio (${hint})`));
+        });
       const cleanup = () => {
         this.audio.removeEventListener("canplay", onReady);
         this.audio.removeEventListener("loadedmetadata", onReady);
         this.audio.removeEventListener("error", onError);
+        clearTimeout(timer);
       };
 
-      this.audio.addEventListener("canplay", onReady, { once: true });
-      this.audio.addEventListener("error", onError, { once: true });
+      // Long audiobooks may take a moment for metadata
+      const timer = setTimeout(() => {
+        // If network is slow but no error, allow play to proceed after timeout
+        // when we at least have a src assigned.
+        if (!settled && this.audio.src) {
+          settle(() => resolve());
+        }
+      }, 20_000);
+
+      this.audio.addEventListener("canplay", onReady);
+      this.audio.addEventListener("loadedmetadata", onReady);
+      this.audio.addEventListener("error", onError);
       this.audio.src = url;
       this.audio.load();
-
-      // Some webviews only fire loadedmetadata for long streams
-      this.audio.addEventListener("loadedmetadata", onReady, { once: true });
     });
   }
 
