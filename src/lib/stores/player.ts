@@ -77,18 +77,17 @@ function createPlayerStore() {
 
   engine.on((event) => {
     const s = get(store);
-    if (!s.ready || s.tracks.length === 0) return;
+    // Ignore engine noise while a new source is loading
+    if (s.loading || !s.ready || s.tracks.length === 0) return;
 
     const offsets = trackOffsets(s.tracks);
 
     if (event === "timeupdate" || event === "durationchange" || event === "loadedmetadata") {
       const trackPos = engine.getPosition();
       const trackDur = engine.getDuration();
-      // Prefer live track duration if metadata lacked it
       let bookPos = (offsets[s.trackIndex] ?? 0) + trackPos;
       let bookDur = s.durationSec;
       if (trackDur > 0 && !(s.tracks[s.trackIndex]?.durationMs)) {
-        // recompute with live duration for current track only for display
         bookDur = Math.max(bookDur, bookPos + (trackDur - trackPos));
       }
       update((st) => ({
@@ -98,8 +97,13 @@ function createPlayerStore() {
       }));
     }
 
-    if (event === "playing") update((st) => ({ ...st, playing: true }));
-    if (event === "paused") update((st) => ({ ...st, playing: false }));
+    if (event === "playing") {
+      update((st) => ({ ...st, playing: true }));
+    }
+    if (event === "paused") {
+      // Don't clear playing if we intentionally ignore brief pauses during seek
+      update((st) => ({ ...st, playing: false }));
+    }
 
     if (event === "ended") {
       void advanceTrack();
@@ -110,6 +114,7 @@ function createPlayerStore() {
         ...st,
         error: "Playback error — stream may be unreachable from this network",
         playing: false,
+        loading: false,
       }));
       stopProgressLoop();
     }
@@ -185,6 +190,8 @@ function createPlayerStore() {
       ...st,
       trackIndex: index,
       loading: true,
+      ready: false,
+      playing: false,
       error: null,
     }));
 
@@ -202,6 +209,8 @@ function createPlayerStore() {
       }));
 
       if (autoplay) {
+        // Optimistic UI — don't wait only on media events (can be flaky in webview)
+        update((st) => ({ ...st, playing: true }));
         await engine.play();
         startProgressLoop();
         void flushProgress("playing");
@@ -316,21 +325,25 @@ function createPlayerStore() {
 
     async toggle() {
       const s = get(store);
-      if (!s.book || !s.ready) return;
+      // Ignore while loading or not ready — avoids race errors on early clicks
+      if (!s.book || !s.ready || s.loading) return;
 
-      if (engine.isPaused()) {
+      if (!s.playing || engine.isPaused()) {
         try {
-          await engine.play();
+          update((st) => ({ ...st, playing: true, error: null }));
           engine.setRate(s.rate);
+          await engine.play();
           startProgressLoop();
           void flushProgress("playing");
         } catch (e) {
           update((st) => ({
             ...st,
+            playing: false,
             error: e instanceof Error ? e.message : String(e),
           }));
         }
       } else {
+        update((st) => ({ ...st, playing: false }));
         engine.pause();
         stopProgressLoop();
         void flushProgress("paused");

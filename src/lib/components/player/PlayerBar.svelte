@@ -12,6 +12,10 @@
     if (n <= 1) return null;
     return `Track ${$player.trackIndex + 1}/${n}`;
   });
+
+  /** Transport only when a stream is ready and not mid-load */
+  const canControl = $derived($player.ready && !$player.loading);
+  const showPause = $derived($player.playing && !$player.loading);
 </script>
 
 <footer
@@ -26,7 +30,7 @@
       max={Math.max($player.durationSec, 1)}
       step="1"
       value={$player.positionSec}
-      disabled={!$player.ready}
+      disabled={!canControl}
       oninput={onSeek}
       aria-label="Seek"
     />
@@ -72,26 +76,37 @@
       <button
         type="button"
         class="btn-icon"
-        disabled={!$player.ready}
+        disabled={!canControl}
         onclick={() => player.skip(-30)}
         aria-label="Back 30 seconds"
         title="-30s"
       >
         −30
       </button>
+
       <button
         type="button"
-        class="flex h-12 w-12 items-center justify-center rounded-full bg-ra-accent text-base font-bold text-white transition hover:bg-ra-accent-hover disabled:opacity-40"
-        disabled={!$player.ready && !$player.loading}
+        class="flex h-12 w-12 items-center justify-center rounded-full bg-ra-accent text-base font-bold text-white transition hover:bg-ra-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
+        disabled={!canControl}
         onclick={() => player.toggle()}
-        aria-label={$player.playing ? "Pause" : "Play"}
+        aria-label={$player.loading ? "Loading" : showPause ? "Pause" : "Play"}
+        aria-busy={$player.loading}
+        title={$player.loading ? "Loading…" : showPause ? "Pause" : "Play"}
       >
-        {$player.playing ? "❚❚" : "▶"}
+        {#if $player.loading}
+          <span class="spinner" aria-hidden="true"></span>
+          <span class="sr-only">Loading</span>
+        {:else if showPause}
+          <span aria-hidden="true" class="pause-icon">❚❚</span>
+        {:else}
+          <span aria-hidden="true" class="play-icon">▶</span>
+        {/if}
       </button>
+
       <button
         type="button"
         class="btn-icon"
-        disabled={!$player.ready}
+        disabled={!canControl}
         onclick={() => player.skip(30)}
         aria-label="Forward 30 seconds"
         title="+30s"
@@ -104,9 +119,9 @@
       <label class="flex items-center gap-1.5 text-xs text-ra-muted">
         <span class="hidden sm:inline">Speed</span>
         <select
-          class="min-h-10 rounded-lg border border-ra-border bg-ra-surface-2 px-2 text-sm text-ra-text"
+          class="min-h-10 rounded-lg border border-ra-border bg-ra-surface-2 px-2 text-sm text-ra-text disabled:opacity-50"
           value={$player.rate}
-          disabled={!$player.ready}
+          disabled={!canControl}
           onchange={(e) => player.setRate(Number((e.target as HTMLSelectElement).value))}
           aria-label="Playback speed"
         >
@@ -138,8 +153,46 @@
   }
   .btn-icon:disabled {
     opacity: 0.4;
+    cursor: not-allowed;
   }
   .btn-icon:hover:not(:disabled) {
     border-color: var(--color-ra-accent);
+  }
+
+  .play-icon {
+    display: inline-block;
+    margin-left: 2px; /* optical center triangle */
+  }
+
+  .pause-icon {
+    letter-spacing: -0.05em;
+    font-size: 0.85em;
+  }
+
+  .spinner {
+    width: 1.35rem;
+    height: 1.35rem;
+    border: 2.5px solid rgba(255, 255, 255, 0.35);
+    border-top-color: #fff;
+    border-radius: 999px;
+    animation: ra-spin 0.7s linear infinite;
+  }
+
+  @keyframes ra-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
   }
 </style>
