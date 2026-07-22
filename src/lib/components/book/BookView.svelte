@@ -5,6 +5,7 @@
   import { player, formatTime } from "$lib/stores/player";
   import { resolveChapterWindow } from "$lib/chapterProgress";
   import RetryPanel from "$lib/components/ui/RetryPanel.svelte";
+  import SleepTimer from "$lib/components/player/SleepTimer.svelte";
   import type { AudiobookSummary, BookChapter, BookDetail, ProgressSnapshot } from "$lib/types/models";
 
   let {
@@ -285,7 +286,7 @@
             {/if}
           </div>
 
-          <div class="flex flex-wrap gap-3 pt-1">
+          <div class="flex flex-wrap items-center gap-3 pt-1">
             <button type="button" class="btn-primary" onclick={playOrResume}>
               {#if isCurrent && $player.loading}
                 <span class="ra-spinner ra-spinner-on-accent" aria-hidden="true"></span>
@@ -306,6 +307,11 @@
                 +30s
               </button>
             {/if}
+            <!-- Same SleepTimer component + player.sleep store as the bottom bar -->
+            <div class="flex items-center gap-2">
+              <span class="hidden text-xs text-ra-muted sm:inline">Sleep</span>
+              <SleepTimer />
+            </div>
           </div>
         </div>
       </section>

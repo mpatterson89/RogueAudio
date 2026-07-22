@@ -1,6 +1,7 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
   import { player, formatTime, PLAYBACK_RATES } from "$lib/stores/player";
+  import { settings } from "$lib/stores/settings";
   import { resolveChapterWindow } from "$lib/chapterProgress";
   import { bookHref } from "$lib/nav";
   import SleepTimer from "./SleepTimer.svelte";
@@ -197,6 +198,15 @@
         </select>
       </label>
       <SleepTimer />
+      <button
+        type="button"
+        class="btn-icon"
+        title="Hide player"
+        aria-label="Hide player"
+        onclick={() => settings.patch({ playerBarVisible: false })}
+      >
+        ▼
+      </button>
     </div>
   </div>
 

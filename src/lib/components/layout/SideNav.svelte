@@ -1,6 +1,8 @@
 <script lang="ts">
   import { page } from "$app/stores";
   import { auth } from "$lib/stores/auth";
+  import { settings } from "$lib/stores/settings";
+  import { player } from "$lib/stores/player";
 
   const links = [
     { href: "/", label: "Library", icon: "📚" },
@@ -42,18 +44,39 @@
     {/each}
   </nav>
 
-  <div class="border-t border-ra-border p-3 text-xs text-ra-muted">
-    {#if $auth.status.authenticated}
-      <p
-        class="hidden truncate sm:block"
-        title={$auth.status.username?.trim() || "Signed in"}
+  <div class="space-y-2 border-t border-ra-border p-2">
+    <button
+      type="button"
+      class="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm font-medium text-ra-muted transition-colors hover:bg-ra-surface-2 hover:text-ra-text"
+      onclick={() => settings.togglePlayerBar()}
+      title={$settings.playerBarVisible ? "Hide player" : "Show player"}
+      aria-pressed={$settings.playerBarVisible}
+      aria-label={$settings.playerBarVisible ? "Hide player" : "Show player"}
+    >
+      <span class="text-base" aria-hidden="true"
+        >{$settings.playerBarVisible ? "▼" : "▲"}</span
       >
-        {$auth.status.username?.trim() || "Signed in"}
-      </p>
-      <p class="sm:hidden text-center" title="Signed in">●</p>
-    {:else}
-      <p class="hidden sm:block">Not signed in</p>
-      <p class="sm:hidden text-center opacity-50">○</p>
-    {/if}
+      <span class="hidden sm:inline">
+        {$settings.playerBarVisible ? "Hide player" : "Show player"}
+      </span>
+      {#if !$settings.playerBarVisible && $player.playing}
+        <span class="hidden text-[10px] text-ra-accent sm:inline">playing</span>
+      {/if}
+    </button>
+
+    <div class="px-1 text-xs text-ra-muted">
+      {#if $auth.status.authenticated}
+        <p
+          class="hidden truncate sm:block"
+          title={$auth.status.username?.trim() || "Signed in"}
+        >
+          {$auth.status.username?.trim() || "Signed in"}
+        </p>
+        <p class="sm:hidden text-center" title="Signed in">●</p>
+      {:else}
+        <p class="hidden sm:block">Not signed in</p>
+        <p class="sm:hidden text-center opacity-50">○</p>
+      {/if}
+    </div>
   </div>
 </aside>
