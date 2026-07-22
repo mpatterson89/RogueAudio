@@ -2,21 +2,29 @@ import { writable, get } from "svelte/store";
 import { getAudioEngine } from "$lib/audio/engine";
 import { progressApi } from "$lib/api/progress";
 import { plexApi } from "$lib/api/plex";
-import type { AudiobookSummary, SleepTimerState } from "$lib/types/models";
+import type {
+  AudiobookSummary,
+  PlaybackTrack,
+  SleepTimerState,
+} from "$lib/types/models";
 
 export const PLAYBACK_RATES = [0.8, 0.9, 1, 1.1, 1.2, 1.25, 1.5, 1.75, 2] as const;
 
 interface PlayerState {
   book: AudiobookSummary | null;
   serverId: string | null;
-  playing: boolean;
+  tracks: PlaybackTrack[];
+  trackIndex: number;
+  /** Book-level position (across tracks), seconds */
   positionSec: number;
+  /** Book-level duration, seconds */
   durationSec: number;
+  playing: boolean;
   rate: number;
   sleep: SleepTimerState;
   error: string | null;
-  /** Demo mode: no real stream yet */
-  demoMode: boolean;
+  ready: boolean;
+  loading: boolean;
 }
 
 const initialSleep: SleepTimerState = {
@@ -29,43 +37,81 @@ const initialSleep: SleepTimerState = {
 const initial: PlayerState = {
   book: null,
   serverId: null,
-  playing: false,
+  tracks: [],
+  trackIndex: 0,
   positionSec: 0,
   durationSec: 0,
+  playing: false,
   rate: 1,
   sleep: initialSleep,
   error: null,
-  demoMode: false,
+  ready: false,
+  loading: false,
 };
+
+function trackOffsets(tracks: PlaybackTrack[]): number[] {
+  const offsets: number[] = [];
+  let acc = 0;
+  for (const t of tracks) {
+    offsets.push(acc);
+    acc += (t.durationMs ?? 0) / 1000;
+  }
+  return offsets;
+}
+
+function totalDurationSec(tracks: PlaybackTrack[], totalMs?: number | null): number {
+  if (totalMs && totalMs > 0) return totalMs / 1000;
+  const sum = tracks.reduce((a, t) => a + (t.durationMs ?? 0), 0);
+  return sum > 0 ? sum / 1000 : 0;
+}
 
 function createPlayerStore() {
   const store = writable<PlayerState>(initial);
   const { subscribe, update } = store;
   const engine = getAudioEngine();
+
   let sleepInterval: ReturnType<typeof setInterval> | null = null;
   let progressInterval: ReturnType<typeof setInterval> | null = null;
-  let demoInterval: ReturnType<typeof setInterval> | null = null;
   let lastProgressFlush = 0;
+  let loadGen = 0;
 
   engine.on((event) => {
-    if (event === "timeupdate") {
-      update((s) => ({
-        ...s,
-        positionSec: engine.getPosition(),
-        durationSec: engine.getDuration() || s.durationSec,
+    const s = get(store);
+    if (!s.ready || s.tracks.length === 0) return;
+
+    const offsets = trackOffsets(s.tracks);
+
+    if (event === "timeupdate" || event === "durationchange" || event === "loadedmetadata") {
+      const trackPos = engine.getPosition();
+      const trackDur = engine.getDuration();
+      // Prefer live track duration if metadata lacked it
+      let bookPos = (offsets[s.trackIndex] ?? 0) + trackPos;
+      let bookDur = s.durationSec;
+      if (trackDur > 0 && !(s.tracks[s.trackIndex]?.durationMs)) {
+        // recompute with live duration for current track only for display
+        bookDur = Math.max(bookDur, bookPos + (trackDur - trackPos));
+      }
+      update((st) => ({
+        ...st,
+        positionSec: bookPos,
+        durationSec: bookDur || st.durationSec,
       }));
     }
-    if (event === "playing") update((s) => ({ ...s, playing: true }));
-    if (event === "paused") update((s) => ({ ...s, playing: false }));
+
+    if (event === "playing") update((st) => ({ ...st, playing: true }));
+    if (event === "paused") update((st) => ({ ...st, playing: false }));
+
     if (event === "ended") {
-      update((s) => ({ ...s, playing: false }));
-      void flushProgress("stopped");
+      void advanceTrack();
     }
-    if (event === "durationchange" || event === "loadedmetadata") {
-      update((s) => ({ ...s, durationSec: engine.getDuration() }));
-    }
+
     if (event === "error") {
-      update((s) => ({ ...s, error: "Playback error", playing: false }));
+      update((st) => ({
+        ...st,
+        error: "Playback error — stream may be unreachable from this network",
+        playing: false,
+      }));
+      stopProgressLoop();
     }
   });
 
@@ -82,7 +128,7 @@ function createPlayerStore() {
       });
       lastProgressFlush = Date.now();
     } catch {
-      // local reliability is handled in Rust; network failures are OK
+      /* local write is best-effort */
     }
   }
 
@@ -111,44 +157,13 @@ function createPlayerStore() {
     }
   }
 
-  function stopDemoClock() {
-    if (demoInterval) {
-      clearInterval(demoInterval);
-      demoInterval = null;
-    }
-  }
-
-  function startDemoClock() {
-    stopDemoClock();
-    demoInterval = setInterval(() => {
-      const s = get(store);
-      if (!s.playing || !s.demoMode) {
-        stopDemoClock();
-        return;
-      }
-      update((st) => {
-        const next = st.positionSec + 0.25 * st.rate;
-        if (st.durationSec && next >= st.durationSec) {
-          stopDemoClock();
-          return { ...st, positionSec: st.durationSec, playing: false };
-        }
-        return { ...st, positionSec: next };
-      });
-    }, 250);
-  }
-
   function armSleepWatcher() {
     clearSleepTimer();
     sleepInterval = setInterval(() => {
       const s = get(store);
       if (s.sleep.mode !== "duration" || !s.sleep.endsAt) return;
-      const remaining = s.sleep.endsAt - Date.now();
-      if (remaining <= 0) {
-        if (s.demoMode) {
-          stopDemoClock();
-        } else {
-          engine.pause();
-        }
+      if (s.sleep.endsAt - Date.now() <= 0) {
+        engine.pause();
         void flushProgress("paused");
         update((st) => ({
           ...st,
@@ -156,105 +171,207 @@ function createPlayerStore() {
           sleep: { ...st.sleep, mode: "off", endsAt: null },
         }));
         clearSleepTimer();
+        stopProgressLoop();
       }
     }, 500);
   }
 
+  async function loadTrackAt(index: number, seekSec = 0, autoplay = false) {
+    const s = get(store);
+    const track = s.tracks[index];
+    if (!track) return;
+
+    update((st) => ({
+      ...st,
+      trackIndex: index,
+      loading: true,
+      error: null,
+    }));
+
+    try {
+      await engine.load(track.url);
+      engine.setRate(s.rate);
+      if (seekSec > 0) engine.seek(seekSec);
+
+      const offsets = trackOffsets(s.tracks);
+      update((st) => ({
+        ...st,
+        loading: false,
+        ready: true,
+        positionSec: (offsets[index] ?? 0) + Math.max(0, seekSec),
+      }));
+
+      if (autoplay) {
+        await engine.play();
+        startProgressLoop();
+        void flushProgress("playing");
+      }
+    } catch (e) {
+      update((st) => ({
+        ...st,
+        loading: false,
+        ready: false,
+        playing: false,
+        error: e instanceof Error ? e.message : String(e),
+      }));
+    }
+  }
+
+  async function advanceTrack() {
+    const s = get(store);
+    if (s.trackIndex + 1 < s.tracks.length) {
+      await loadTrackAt(s.trackIndex + 1, 0, true);
+      return;
+    }
+    // Finished book
+    update((st) => ({ ...st, playing: false }));
+    stopProgressLoop();
+    void flushProgress("stopped");
+  }
+
   return {
     subscribe,
-    async loadBook(serverId: string, book: AudiobookSummary) {
-      stopDemoClock();
+
+    async loadBook(serverId: string, book: AudiobookSummary, autoplay = true) {
+      const gen = ++loadGen;
+      engine.pause();
+      stopProgressLoop();
+
       update((s) => ({
         ...s,
         book,
         serverId,
-        error: null,
-        playing: false,
+        tracks: [],
+        trackIndex: 0,
         positionSec: 0,
         durationSec: book.durationMs ? book.durationMs / 1000 : 0,
+        playing: false,
+        ready: false,
+        loading: true,
+        error: null,
       }));
 
       try {
-        const stream = await plexApi.getStream(serverId, book.ratingKey);
-        const isStub = stream.url.startsWith("plex://stub");
-        if (isStub) {
+        const playback = await plexApi.getPlayback(serverId, book.ratingKey);
+        if (gen !== loadGen) return;
+
+        const tracks = playback.tracks ?? [];
+        if (tracks.length === 0) {
           update((s) => ({
             ...s,
-            demoMode: true,
-            durationSec: book.durationMs ? book.durationMs / 1000 : 3600,
+            loading: false,
+            error: "No playable audio found for this title",
           }));
-        } else {
-          update((s) => ({ ...s, demoMode: false }));
-          const headers = Object.fromEntries(stream.headers);
-          await engine.load(stream.url, headers);
+          return;
         }
 
-        const progress = await progressApi.get(book.ratingKey);
-        if (progress && progress.positionMs > 0) {
-          const sec = progress.positionMs / 1000;
-          if (!isStub) engine.seek(sec);
-          update((s) => ({ ...s, positionSec: sec }));
-        }
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        // Library browse can work before stream resolution is implemented.
-        const playbackPending =
-          /not implemented|stream playback/i.test(msg) ||
-          msg.includes("stream playback against PMS");
+        const durationSec = totalDurationSec(tracks, playback.totalDurationMs);
         update((s) => ({
           ...s,
-          demoMode: false,
-          error: playbackPending
-            ? "Playback coming next — library browse & search work now."
-            : msg,
+          tracks,
+          durationSec: durationSec || s.durationSec,
+        }));
+
+        // Resume from local progress when possible
+        let resumeSec = 0;
+        try {
+          const progress = await progressApi.get(book.ratingKey);
+          if (progress && progress.positionMs > 15_000) {
+            resumeSec = progress.positionMs / 1000;
+          }
+        } catch {
+          /* ignore */
+        }
+
+        if (gen !== loadGen) return;
+
+        // Map book position → track + offset
+        const offsets = trackOffsets(tracks);
+        let trackIndex = 0;
+        let seekInTrack = 0;
+        if (resumeSec > 0 && durationSec > 0) {
+          for (let i = 0; i < tracks.length; i++) {
+            const start = offsets[i] ?? 0;
+            const len = (tracks[i].durationMs ?? 0) / 1000;
+            const end = len > 0 ? start + len : start + 1e12;
+            if (resumeSec < end || i === tracks.length - 1) {
+              trackIndex = i;
+              seekInTrack = Math.max(0, resumeSec - start);
+              break;
+            }
+          }
+        }
+
+        await loadTrackAt(trackIndex, seekInTrack, autoplay);
+      } catch (e) {
+        if (gen !== loadGen) return;
+        update((s) => ({
+          ...s,
+          loading: false,
+          ready: false,
+          error: e instanceof Error ? e.message : String(e),
         }));
       }
     },
+
     async toggle() {
       const s = get(store);
-      if (!s.book) return;
-
-      if (s.demoMode) {
-        if (s.playing) {
-          stopDemoClock();
-          update((st) => ({ ...st, playing: false }));
-          stopProgressLoop();
-          void flushProgress("paused");
-        } else {
-          update((st) => ({ ...st, playing: true }));
-          startDemoClock();
-          startProgressLoop();
-          void flushProgress("playing");
-        }
-        return;
-      }
+      if (!s.book || !s.ready) return;
 
       if (engine.isPaused()) {
-        await engine.play();
-        engine.setRate(s.rate);
-        startProgressLoop();
-        void flushProgress("playing");
+        try {
+          await engine.play();
+          engine.setRate(s.rate);
+          startProgressLoop();
+          void flushProgress("playing");
+        } catch (e) {
+          update((st) => ({
+            ...st,
+            error: e instanceof Error ? e.message : String(e),
+          }));
+        }
       } else {
         engine.pause();
         stopProgressLoop();
         void flushProgress("paused");
       }
     },
-    seek(seconds: number) {
+
+    async seek(bookSeconds: number) {
       const s = get(store);
-      const clamped = Math.max(0, Math.min(seconds, s.durationSec || seconds));
-      if (s.demoMode) {
-        update((st) => ({ ...st, positionSec: clamped }));
+      if (!s.ready || s.tracks.length === 0) return;
+
+      const clamped = Math.max(0, Math.min(bookSeconds, s.durationSec || bookSeconds));
+      const offsets = trackOffsets(s.tracks);
+
+      let trackIndex = s.trackIndex;
+      let seekInTrack = clamped;
+
+      for (let i = 0; i < s.tracks.length; i++) {
+        const start = offsets[i] ?? 0;
+        const len = (s.tracks[i].durationMs ?? 0) / 1000;
+        const end = i === s.tracks.length - 1 ? Number.POSITIVE_INFINITY : start + Math.max(len, 0.001);
+        if (clamped >= start && clamped < end) {
+          trackIndex = i;
+          seekInTrack = clamped - start;
+          break;
+        }
+      }
+
+      if (trackIndex !== s.trackIndex) {
+        await loadTrackAt(trackIndex, seekInTrack, s.playing || !engine.isPaused());
       } else {
-        engine.seek(clamped);
+        engine.seek(seekInTrack);
         update((st) => ({ ...st, positionSec: clamped }));
       }
       void flushProgress(s.playing ? "playing" : "paused");
     },
+
     setRate(rate: number) {
       engine.setRate(rate);
       update((s) => ({ ...s, rate }));
     },
+
     setSleepDuration(minutes: number) {
       const endsAt = Date.now() + minutes * 60 * 1000;
       update((s) => ({
@@ -263,12 +380,14 @@ function createPlayerStore() {
       }));
       armSleepWatcher();
     },
+
     setSleepEndOfChapter() {
       update((s) => ({
         ...s,
         sleep: { ...s.sleep, mode: "end_of_chapter", endsAt: null },
       }));
     },
+
     clearSleep() {
       clearSleepTimer();
       update((s) => ({
@@ -276,9 +395,10 @@ function createPlayerStore() {
         sleep: { ...initialSleep },
       }));
     },
+
     skip(deltaSec: number) {
       const s = get(store);
-      this.seek(Math.max(0, s.positionSec + deltaSec));
+      void this.seek(Math.max(0, s.positionSec + deltaSec));
     },
   };
 }

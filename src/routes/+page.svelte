@@ -25,8 +25,8 @@
   async function selectBook(book: (typeof $library.books)[0]) {
     const serverId = $library.serverId;
     if (!serverId) return;
-    // Load into player bar (playback streams land next).
-    await player.loadBook(serverId, book);
+    // Resolve streams and start playback.
+    await player.loadBook(serverId, book, true);
   }
 </script>
 

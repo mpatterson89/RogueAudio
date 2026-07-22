@@ -34,7 +34,8 @@ export class Html5AudioEngine implements AudioEngine {
 
   constructor() {
     this.audio = new Audio();
-    this.audio.preload = "metadata";
+    this.audio.preload = "auto";
+    // Do not set crossOrigin — PMS often omits CORS headers; playback still works.
     this.onAudioEvent = (type: AudioEngineEvent) => () => this.emit(type);
 
     const types: AudioEngineEvent[] = [
@@ -56,10 +57,33 @@ export class Html5AudioEngine implements AudioEngine {
   }
 
   async load(url: string, _headers?: Record<string, string>): Promise<void> {
-    // Note: custom headers on media elements are limited in webview.
-    // Real Plex streams typically use token query params; Rust will supply that.
-    this.audio.src = url;
-    this.audio.load();
+    // Token is in the query string (set by Rust). Custom headers cannot be set
+    // on HTMLAudioElement in a webview.
+    await new Promise<void>((resolve, reject) => {
+      const onReady = () => {
+        cleanup();
+        resolve();
+      };
+      const onError = () => {
+        cleanup();
+        const code = this.audio.error?.code;
+        const msg = this.audio.error?.message || `media error code ${code ?? "?"}`;
+        reject(new Error(`Failed to load audio: ${msg}`));
+      };
+      const cleanup = () => {
+        this.audio.removeEventListener("canplay", onReady);
+        this.audio.removeEventListener("loadedmetadata", onReady);
+        this.audio.removeEventListener("error", onError);
+      };
+
+      this.audio.addEventListener("canplay", onReady, { once: true });
+      this.audio.addEventListener("error", onError, { once: true });
+      this.audio.src = url;
+      this.audio.load();
+
+      // Some webviews only fire loadedmetadata for long streams
+      this.audio.addEventListener("loadedmetadata", onReady, { once: true });
+    });
   }
 
   async play(): Promise<void> {

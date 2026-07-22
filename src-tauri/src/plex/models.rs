@@ -93,6 +93,28 @@ pub struct StreamInfo {
     pub container: Option<String>,
 }
 
+/// One playable audio part (usually a track under an album/book).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybackTrack {
+    pub rating_key: String,
+    pub title: String,
+    pub index: u32,
+    pub duration_ms: Option<u64>,
+    /// Fully-qualified stream URL including X-Plex-Token query param.
+    pub url: String,
+    pub container: Option<String>,
+}
+
+/// Resolved playlist for a book (album) or single track.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybackInfo {
+    pub book_rating_key: String,
+    pub tracks: Vec<PlaybackTrack>,
+    pub total_duration_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProgressSnapshot {

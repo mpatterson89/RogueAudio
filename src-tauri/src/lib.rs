@@ -21,6 +21,7 @@ pub fn run() {
             plex_list_servers,
             plex_list_libraries,
             plex_list_books,
+            plex_get_playback,
             plex_get_stream,
             // Progress
             progress_get,

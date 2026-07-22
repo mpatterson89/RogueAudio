@@ -54,6 +54,21 @@ export interface StreamInfo {
   container?: string | null;
 }
 
+export interface PlaybackTrack {
+  ratingKey: string;
+  title: string;
+  index: number;
+  durationMs?: number | null;
+  url: string;
+  container?: string | null;
+}
+
+export interface PlaybackInfo {
+  bookRatingKey: string;
+  tracks: PlaybackTrack[];
+  totalDurationMs?: number | null;
+}
+
 export interface ProgressSnapshot {
   ratingKey: string;
   positionMs: number;

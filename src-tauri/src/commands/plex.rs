@@ -1,7 +1,7 @@
 use crate::error::AppResult;
 use crate::plex::{
-    self, AudiobookSummary, AuthStatus, PinAuthPoll, PinAuthStart, PlexLibrary, PlexServer,
-    StreamInfo,
+    self, AudiobookSummary, AuthStatus, PlaybackInfo, PinAuthPoll, PinAuthStart, PlexLibrary,
+    PlexServer, StreamInfo,
 };
 use crate::PlexAuthState;
 use tauri::State;
@@ -75,18 +75,34 @@ pub async fn plex_list_books(
     plex::list_books(&server_id, &library_key, query.as_deref()).await
 }
 
+/// Resolve a book/album (or track) into an ordered list of stream URLs.
+#[tauri::command]
+pub async fn plex_get_playback(
+    server_id: String,
+    rating_key: String,
+) -> AppResult<PlaybackInfo> {
+    if !plex::is_authenticated() {
+        return Err(crate::error::AppError::NotAuthenticated);
+    }
+    plex::get_playback(&server_id, &rating_key).await
+}
+
+/// Convenience: first track stream only (legacy / simple clients).
 #[tauri::command]
 pub async fn plex_get_stream(
     server_id: String,
     rating_key: String,
 ) -> AppResult<StreamInfo> {
-    if !plex::is_authenticated() {
-        return Err(crate::error::AppError::NotAuthenticated);
-    }
-
-    // Stream resolution lands next; keep a clear error until then.
-    let _ = (server_id, rating_key);
-    Err(crate::error::AppError::NotImplemented(
-        "stream playback against PMS parts — next step after library browse",
-    ))
+    let playback = plex_get_playback(server_id, rating_key).await?;
+    let first = playback
+        .tracks
+        .into_iter()
+        .next()
+        .ok_or_else(|| crate::error::AppError::Message("no tracks".into()))?;
+    Ok(StreamInfo {
+        url: first.url,
+        headers: vec![],
+        duration_ms: first.duration_ms.or(playback.total_duration_ms),
+        container: first.container,
+    })
 }
