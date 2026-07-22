@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { goto } from "$app/navigation";
   import { player, formatTime, PLAYBACK_RATES } from "$lib/stores/player";
+  import { bookHref } from "$lib/nav";
   import SleepTimer from "./SleepTimer.svelte";
 
   function onSeek(e: Event) {
@@ -16,6 +18,11 @@
   /** Transport only when a stream is ready and not mid-load */
   const canControl = $derived($player.ready && !$player.loading);
   const showPause = $derived($player.playing && !$player.loading);
+
+  function openBookView() {
+    if (!$player.book || !$player.serverId) return;
+    void goto(bookHref($player.serverId, $player.book.ratingKey));
+  }
 </script>
 
 <footer
@@ -43,9 +50,19 @@
   <div
     class="flex flex-wrap items-center gap-2 px-3 pb-3 pt-1 sm:flex-nowrap sm:gap-4 sm:px-4 sm:pb-3"
   >
-    <div class="flex min-w-0 flex-1 items-center gap-3">
+    <button
+      type="button"
+      class="flex min-w-0 flex-1 items-center gap-3 rounded-xl text-left transition
+        {$player.book
+        ? 'hover:bg-white/5 focus-visible:bg-white/5 cursor-pointer'
+        : 'cursor-default'}"
+      disabled={!$player.book}
+      onclick={openBookView}
+      title={$player.book ? "Open book view" : undefined}
+      aria-label={$player.book ? `Open details for ${$player.book.title}` : "Nothing playing"}
+    >
       <div
-        class="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-ra-surface-2 text-xl"
+        class="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-ra-surface-2 text-xl ring-1 ring-white/5"
       >
         {#if $player.book?.thumb}
           <img src={$player.book.thumb} alt="" class="h-full w-full object-cover" />
@@ -63,6 +80,8 @@
             {/if}
             {#if $player.loading}
               <span class="ml-1 text-ra-accent">loading…</span>
+            {:else}
+              <span class="ml-1 text-ra-muted/50">· details</span>
             {/if}
           </p>
         {:else}
@@ -70,7 +89,7 @@
           <p class="text-xs text-ra-muted/70">Pick a book from your library</p>
         {/if}
       </div>
-    </div>
+    </button>
 
     <div class="flex items-center justify-center gap-1 sm:gap-2">
       <button

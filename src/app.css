@@ -79,3 +79,11 @@ input[type="range"]::-moz-range-thumb {
   scrollbar-width: thin;
   scrollbar-color: var(--color-ra-border) transparent;
 }
+
+/* Book view clamp helper (Tailwind line-clamp may not be enabled) */
+.line-clamp-5 {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 5;
+  overflow: hidden;
+}

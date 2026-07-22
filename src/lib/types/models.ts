@@ -69,6 +69,30 @@ export interface PlaybackInfo {
   totalDurationMs?: number | null;
 }
 
+export interface BookChapter {
+  index: number;
+  title: string;
+  startMs: number;
+  endMs?: number | null;
+  /** embedded | track */
+  source: string;
+}
+
+export interface BookDetail {
+  ratingKey: string;
+  title: string;
+  author?: string | null;
+  summary?: string | null;
+  year?: number | null;
+  thumb?: string | null;
+  art?: string | null;
+  durationMs?: number | null;
+  libraryKey?: string | null;
+  studio?: string | null;
+  chapters: BookChapter[];
+  trackCount: number;
+}
+
 export interface ProgressSnapshot {
   ratingKey: string;
   positionMs: number;

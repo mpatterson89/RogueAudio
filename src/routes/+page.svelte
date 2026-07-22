@@ -6,6 +6,7 @@
   import { player } from "$lib/stores/player";
   import SearchBar from "$lib/components/library/SearchBar.svelte";
   import BookGrid from "$lib/components/library/BookGrid.svelte";
+  import { bookHref } from "$lib/nav";
 
   let search = $state("");
 
@@ -25,8 +26,9 @@
   async function selectBook(book: (typeof $library.books)[0]) {
     const serverId = $library.serverId;
     if (!serverId) return;
-    // Resolve streams and start playback.
+    // Start playback, then open the dedicated book view.
     await player.loadBook(serverId, book, true);
+    await goto(bookHref(serverId, book.ratingKey));
   }
 </script>
 

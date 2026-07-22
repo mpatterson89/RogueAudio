@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AudiobookSummary,
   AuthStatus,
+  BookDetail,
   PlaybackInfo,
   PinAuthPoll,
   PinAuthStart,
@@ -26,6 +27,8 @@ export const plexApi = {
       libraryKey,
       query: query ?? null,
     }),
+  getBookDetail: (serverId: string, ratingKey: string) =>
+    invoke<BookDetail>("plex_get_book_detail", { serverId, ratingKey }),
   getPlayback: (serverId: string, ratingKey: string) =>
     invoke<PlaybackInfo>("plex_get_playback", { serverId, ratingKey }),
   getStream: (serverId: string, ratingKey: string) =>
