@@ -6,6 +6,7 @@
   import { player } from "$lib/stores/player";
   import SearchBar from "$lib/components/library/SearchBar.svelte";
   import BookGrid from "$lib/components/library/BookGrid.svelte";
+  import RetryPanel from "$lib/components/ui/RetryPanel.svelte";
   import { bookHref } from "$lib/nav";
 
   let search = $state("");
@@ -18,7 +19,7 @@
   });
 
   $effect(() => {
-    if ($isAuthenticated && $library.servers.length === 0 && !$library.loading) {
+    if ($isAuthenticated && $library.servers.length === 0 && !$library.loading && !$library.error) {
       void library.loadServers();
     }
   });
@@ -26,9 +27,12 @@
   async function selectBook(book: (typeof $library.books)[0]) {
     const serverId = $library.serverId;
     if (!serverId) return;
-    // Start playback, then open the dedicated book view.
     await player.loadBook(serverId, book, true);
     await goto(bookHref(serverId, book.ratingKey));
+  }
+
+  async function retryLibrary() {
+    await library.retry();
   }
 </script>
 
@@ -119,14 +123,18 @@
     </header>
 
     {#if $library.error}
-      <div class="rounded-xl border border-ra-danger/40 bg-ra-danger/10 px-4 py-3 text-sm text-ra-danger">
-        {$library.error}
+      <RetryPanel
+        title="Couldn't load your library"
+        message={$library.error}
+        loading={$library.loading}
+        onretry={retryLibrary}
+      />
+    {:else if $library.loading && $library.books.length === 0}
+      <div class="flex min-h-48 flex-col items-center justify-center gap-3 py-12">
+        <span class="ra-spinner ra-spinner-lg" aria-hidden="true"></span>
+        <p class="text-sm text-ra-muted">Loading library from your Plex server…</p>
       </div>
-    {/if}
-
-    {#if $library.loading && $library.books.length === 0}
-      <p class="text-sm text-ra-muted">Loading library from your Plex server…</p>
-    {:else if !$library.loading && $library.libraries.length === 0 && !$library.error}
+    {:else if !$library.loading && $library.libraries.length === 0}
       <div
         class="flex min-h-48 flex-col items-center justify-center rounded-2xl border border-dashed border-ra-border bg-ra-surface/50 p-8 text-center"
       >
@@ -137,6 +145,13 @@
           In Plex, audiobooks need to live in a Music-type library (often named
           “Audiobooks”).
         </p>
+        <button
+          type="button"
+          class="mt-4 inline-flex min-h-11 items-center gap-2 rounded-xl border border-ra-border px-4 text-sm text-ra-muted hover:border-ra-accent hover:text-ra-text"
+          onclick={retryLibrary}
+        >
+          Refresh
+        </button>
       </div>
     {:else}
       <BookGrid

@@ -103,6 +103,19 @@ function createLibraryStore() {
     selectServer(serverId: string) {
       void this.loadLibraries(serverId);
     },
+    /** Re-run the most relevant load after a Plex failure. */
+    async retry() {
+      const s = get(store);
+      if (s.serverId && s.libraryKey) {
+        await this.loadBooks(s.serverId, s.libraryKey, s.query || undefined);
+        return;
+      }
+      if (s.serverId) {
+        await this.loadLibraries(s.serverId);
+        return;
+      }
+      await this.loadServers();
+    },
     reset() {
       update(() => ({ ...initial }));
     },

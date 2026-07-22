@@ -3,6 +3,7 @@
   import { plexApi } from "$lib/api/plex";
   import { progressApi } from "$lib/api/progress";
   import { player, formatTime } from "$lib/stores/player";
+  import RetryPanel from "$lib/components/ui/RetryPanel.svelte";
   import type { AudiobookSummary, BookChapter, BookDetail, ProgressSnapshot } from "$lib/types/models";
 
   let {
@@ -129,13 +130,20 @@
 
 {#if loading && !detail}
   <div class="flex min-h-[50vh] flex-col items-center justify-center gap-3">
-    <span class="spinner-lg" aria-hidden="true"></span>
+    <span class="ra-spinner ra-spinner-lg" aria-hidden="true"></span>
     <p class="text-sm text-ra-muted">Opening book…</p>
   </div>
 {:else if error && !detail}
-  <div class="mx-auto max-w-lg space-y-4 py-12 text-center">
-    <p class="text-ra-danger">{error}</p>
-    <button type="button" class="btn-ghost" onclick={() => goto("/")}>Back to library</button>
+  <div class="mx-auto max-w-xl space-y-4 py-10">
+    <RetryPanel
+      title="Couldn't load this book"
+      message={error}
+      loading={loading}
+      onretry={load}
+    />
+    <div class="text-center">
+      <button type="button" class="btn-ghost" onclick={() => goto("/")}>Back to library</button>
+    </div>
   </div>
 {:else if detail}
   <div class="book-view relative -mx-4 -mt-4 min-h-full sm:-mx-6 sm:-mt-5">

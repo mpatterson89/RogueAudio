@@ -87,3 +87,31 @@ input[type="range"]::-moz-range-thumb {
   -webkit-line-clamp: 5;
   overflow: hidden;
 }
+
+/* Shared loading spinner */
+.ra-spinner {
+  width: 1.15rem;
+  height: 1.15rem;
+  border: 2.5px solid rgba(124, 106, 247, 0.3);
+  border-top-color: var(--color-ra-accent);
+  border-radius: 999px;
+  animation: ra-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+
+.ra-spinner-lg {
+  width: 2rem;
+  height: 2rem;
+  border-width: 3px;
+}
+
+.ra-spinner-on-accent {
+  border-color: rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+}
+
+@keyframes ra-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

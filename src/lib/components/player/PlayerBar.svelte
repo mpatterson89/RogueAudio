@@ -34,6 +34,15 @@
     if (!$player.book || !$player.serverId) return;
     void goto(bookHref($player.serverId, $player.book.ratingKey));
   }
+
+  async function retryPlayback() {
+    if (!$player.book || !$player.serverId) return;
+    await player.loadBook($player.serverId, $player.book, {
+      autoplay: true,
+      // Keep bookmark so retry resumes where we left off when possible
+      ignoreResume: false,
+    });
+  }
 </script>
 
 <footer
@@ -162,7 +171,23 @@
   </div>
 
   {#if $player.error}
-    <p class="px-4 pb-2 text-xs text-ra-danger">{$player.error}</p>
+    <div class="flex items-center gap-3 px-4 pb-3">
+      <p class="min-w-0 flex-1 text-xs text-ra-danger">{$player.error}</p>
+      <button
+        type="button"
+        class="inline-flex min-h-9 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-ra-danger/40 bg-ra-danger/10 px-3 text-xs font-semibold text-ra-danger transition hover:bg-ra-danger/20 disabled:cursor-not-allowed disabled:opacity-60"
+        disabled={$player.loading || !$player.book}
+        aria-busy={$player.loading}
+        onclick={retryPlayback}
+      >
+        {#if $player.loading}
+          <span class="ra-spinner" aria-hidden="true"></span>
+          Retrying…
+        {:else}
+          Retry
+        {/if}
+      </button>
+    </div>
   {/if}
 </footer>
 
