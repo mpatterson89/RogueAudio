@@ -45,7 +45,7 @@ See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for:
 - Linux Tauri deps: [Tauri Linux prerequisites](https://v2.tauri.app/start/prerequisites/)  
   (webkit2gtk, rsvg2, and a C toolchain)
 
-On SteamOS / Steam Deck you typically need a writable root or distrobox/toolbox with those libraries to run `tauri dev`.
+**Steam Deck / SteamOS:** use the Distrobox setup in [docs/DEV_STEAM_DECK.md](./docs/DEV_STEAM_DECK.md) (box name: `rogue-dev`).
 
 ### Setup
 
@@ -67,7 +67,12 @@ Open http://localhost:1420 — Rust `invoke` calls need the Tauri runtime; use t
 ### Full app
 
 ```bash
+# Normal Linux with Tauri system deps installed:
 npm run tauri:dev
+
+# Steam Deck (runs inside Distrobox rogue-dev):
+npm run tauri:dev:deck
+# or: ./scripts/dev-tauri.sh
 ```
 
 ### Build

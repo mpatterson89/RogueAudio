@@ -1,5 +1,9 @@
 //! Plex client identity used in auth and API headers.
 //! Keep product + client identifier stable so Plex devices list stays consistent.
+//!
+//! Full header set is ready for the HTTP client; only product/id are used by PIN URL today.
+
+#![allow(dead_code)] // headers used when real plex.tv / PMS client lands
 
 /// Display / product name shown in Plex "authorized devices".
 pub const PLEX_PRODUCT: &str = "RogueAudio";
