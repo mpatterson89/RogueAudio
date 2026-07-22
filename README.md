@@ -1,36 +1,88 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# RogueAudio
 
-## Getting Started
+Open-source **Linux** and **Steam Deck** audiobook client with first-class **Plex** integration.
 
-First, run the development server:
+Built to compete with Prologue’s feature set (not a visual clone): clean dark UI, reliable progress sync, sleep timer, offline downloads, and controller-friendly navigation — all for **self-hosted** libraries. No DRM. No Audible.
+
+## Stack
+
+| Layer | Tech |
+|--------|------|
+| App shell | [Tauri 2](https://tauri.app/) (Rust + webview) |
+| UI | Svelte 5 + TypeScript + Tailwind CSS |
+| State | Svelte stores |
+| Audio (MVP) | HTML5 Audio (swappable → libmpv / GStreamer later) |
+| Packaging | Flatpak-first (planned) |
+
+## Architecture
+
+See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for:
+
+- Frontend / Rust module layout
+- Tauri command surface
+- Playback + progress sync data flow
+- Sleep timer design
+- Implementation phases
+
+## Status (foundation)
+
+- [x] Tauri 2 + SvelteKit + TypeScript scaffold
+- [x] Dark listening-focused UI shell (nav + library + player bar)
+- [x] Modular Rust commands (Plex, progress, downloads stubs)
+- [x] Audio engine abstraction + demo playback path
+- [x] Sleep timer (duration) + speed control UI
+- [x] Local progress persistence (JSON; Plex timeline next)
+- [ ] Live Plex PIN auth + library fetch
+- [ ] Real stream playback
+- [ ] Chapters, downloads, MPRIS, Flatpak
+
+## Development
+
+### Prerequisites
+
+- Node.js 20+
+- Rust (stable) via [rustup](https://rustup.rs/)
+- Linux Tauri deps: [Tauri Linux prerequisites](https://v2.tauri.app/start/prerequisites/)  
+  (webkit2gtk, rsvg2, and a C toolchain)
+
+On SteamOS / Steam Deck you typically need a writable root or distrobox/toolbox with those libraries to run `tauri dev`.
+
+### Setup
+
+```bash
+cd RogueAudio
+npm install
+```
+
+### Frontend only (no native window)
+
+Useful for UI work without full Tauri system deps:
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open http://localhost:1420 — Rust `invoke` calls need the Tauri runtime; use the **stub auth** button to explore UI when running inside `tauri dev`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### Full app
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+npm run tauri:dev
+```
 
-## Learn More
+### Build
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+npm run tauri:build
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Quick UI tour
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+1. **Plex** page → *Continue with stub auth* (dev) or PIN flow (live, upcoming)
+2. **Library** → sample books (stub) or your Plex libraries
+3. Tap a book → player bar loads; play/pause, ±30s, speed, sleep timer
+4. Progress is written under `~/.local/share/rogue-audio/progress/`
 
-## Deploy on Vercel
+## License
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+MIT
