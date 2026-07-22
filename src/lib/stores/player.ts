@@ -96,24 +96,43 @@ function mapBookPosition(
 }
 
 /**
- * Progressive Plex transcoder streams don't seek reliably via currentTime.
- * Bake the start offset into the stream URL instead (ms).
+ * Append/replace query params on a Plex transcoder URL without using the URL
+ * class (avoids path-normalization quirks with `/music/:/transcode/...`).
+ */
+function withQuery(url: string, patch: Record<string, string | null>): string {
+  const qIndex = url.indexOf("?");
+  const base = qIndex >= 0 ? url.slice(0, qIndex) : url;
+  const qs = qIndex >= 0 ? url.slice(qIndex + 1) : "";
+  const map = new Map<string, string>();
+  if (qs) {
+    for (const part of qs.split("&")) {
+      if (!part) continue;
+      const eq = part.indexOf("=");
+      const k = eq >= 0 ? part.slice(0, eq) : part;
+      const v = eq >= 0 ? part.slice(eq + 1) : "";
+      map.set(k, v);
+    }
+  }
+  for (const [k, v] of Object.entries(patch)) {
+    if (v === null) map.delete(k);
+    else map.set(k, encodeURIComponent(v));
+  }
+  const out = Array.from(map.entries())
+    .map(([k, v]) => `${k}=${v}`)
+    .join("&");
+  return `${base}?${out}`;
+}
+
+/**
+ * Progressive transcoder streams often won't HTML5-seek. Prefer baking
+ * start offset into the URL (milliseconds). Always mint a fresh session.
  */
 function streamUrlAt(url: string, offsetSec: number): string {
-  try {
-    const u = new URL(url);
-    const ms = Math.max(0, Math.floor(offsetSec * 1000));
-    if (ms > 250) {
-      u.searchParams.set("offset", String(ms));
-    } else {
-      u.searchParams.delete("offset");
-    }
-    // Fresh session avoids sticky transcoder state when jumping chapters
-    u.searchParams.set("session", crypto.randomUUID());
-    return u.toString();
-  } catch {
-    return url;
-  }
+  const ms = Math.max(0, Math.floor(offsetSec * 1000));
+  return withQuery(url, {
+    session: crypto.randomUUID(),
+    offset: ms > 250 ? String(ms) : null,
+  });
 }
 
 function createPlayerStore() {
@@ -265,17 +284,37 @@ function createPlayerStore() {
       error: null,
     }));
 
-    streamBaseOffsetSec = Math.max(0, seekInTrackSec);
-    const url = streamUrlAt(track.url, streamBaseOffsetSec);
+    const wantOffset = Math.max(0, seekInTrackSec);
+    const offsets = trackOffsets(s.tracks);
 
     try {
-      await engine.load(url);
-      engine.setRate(s.rate);
-      // Position is already baked into the stream; keep element at 0
-      engine.seek(0);
+      // Strategy A: transcoder offset (best for long jumps on progressive MP3)
+      // Strategy B: load from start + HTML5 seek (fallback)
+      let usedOffset = 0;
+      if (wantOffset > 0.25) {
+        try {
+          usedOffset = wantOffset;
+          streamBaseOffsetSec = usedOffset;
+          await engine.load(streamUrlAt(track.url, usedOffset));
+        } catch {
+          usedOffset = 0;
+          streamBaseOffsetSec = 0;
+          await engine.load(streamUrlAt(track.url, 0));
+          await engine.seekAndWait(wantOffset, 10_000);
+          // After element seek, position is engine time from file start
+          streamBaseOffsetSec = 0;
+        }
+      } else {
+        streamBaseOffsetSec = 0;
+        await engine.load(streamUrlAt(track.url, 0));
+      }
 
-      const offsets = trackOffsets(s.tracks);
-      const bookPos = (offsets[index] ?? 0) + streamBaseOffsetSec;
+      engine.setRate(s.rate);
+
+      // Transcoder-offset streams report currentTime≈0; element-seek streams report real time.
+      const trackPos = streamBaseOffsetSec + engine.getPosition();
+      const bookPos = (offsets[index] ?? 0) + trackPos;
+
       update((st) => ({
         ...st,
         loading: false,
@@ -283,7 +322,6 @@ function createPlayerStore() {
         positionSec: bookPos,
       }));
 
-      // Persist immediately so a crash mid-listen keeps the chapter jump
       void flushProgress(autoplay ? "playing" : "paused");
 
       if (autoplay) {
@@ -293,6 +331,7 @@ function createPlayerStore() {
         void flushProgress("playing");
       }
     } catch (e) {
+      engine.reset();
       update((st) => ({
         ...st,
         loading: false,

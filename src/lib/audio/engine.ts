@@ -10,7 +10,8 @@ export type AudioEngineEvent =
   | "playing"
   | "paused"
   | "loadedmetadata"
-  | "durationchange";
+  | "durationchange"
+  | "seeked";
 
 export type AudioEngineListener = (event: AudioEngineEvent, detail?: unknown) => void;
 
@@ -19,10 +20,13 @@ export interface AudioEngine {
   play(): Promise<void>;
   pause(): void;
   seek(seconds: number): void;
+  /** Seek and wait for the element to land (best-effort). */
+  seekAndWait(seconds: number, timeoutMs?: number): Promise<void>;
   setRate(rate: number): void;
   getPosition(): number;
   getDuration(): number;
   isPaused(): boolean;
+  reset(): void;
   destroy(): void;
   on(listener: AudioEngineListener): () => void;
 }
@@ -31,11 +35,11 @@ export class Html5AudioEngine implements AudioEngine {
   private audio: HTMLAudioElement;
   private listeners = new Set<AudioEngineListener>();
   private onAudioEvent: (type: AudioEngineEvent) => EventListener;
+  private loadToken = 0;
 
   constructor() {
     this.audio = new Audio();
     this.audio.preload = "auto";
-    // Do not set crossOrigin — PMS often omits CORS headers; playback still works.
     this.onAudioEvent = (type: AudioEngineEvent) => () => this.emit(type);
 
     const types: AudioEngineEvent[] = [
@@ -46,6 +50,7 @@ export class Html5AudioEngine implements AudioEngine {
       "paused",
       "loadedmetadata",
       "durationchange",
+      "seeked",
     ];
     for (const t of types) {
       this.audio.addEventListener(t, this.onAudioEvent(t));
@@ -56,13 +61,35 @@ export class Html5AudioEngine implements AudioEngine {
     for (const l of this.listeners) l(event, detail);
   }
 
+  /** Tear down current media so the next load is clean. */
+  reset(): void {
+    this.loadToken++;
+    try {
+      this.audio.pause();
+    } catch {
+      /* ignore */
+    }
+    this.audio.removeAttribute("src");
+    this.audio.load();
+  }
+
   async load(url: string, _headers?: Record<string, string>): Promise<void> {
-    // Token / transcoder params are in the query string (set by Rust).
-    // Custom headers cannot be set on HTMLAudioElement in a webview.
+    // Invalidate any in-flight load
+    const token = ++this.loadToken;
+
+    // Fully reset previous source (important when switching chapter streams)
+    try {
+      this.audio.pause();
+    } catch {
+      /* ignore */
+    }
+    this.audio.removeAttribute("src");
+    this.audio.load();
+
     await new Promise<void>((resolve, reject) => {
       let settled = false;
       const settle = (fn: () => void) => {
-        if (settled) return;
+        if (settled || token !== this.loadToken) return;
         settled = true;
         cleanup();
         fn();
@@ -71,7 +98,6 @@ export class Html5AudioEngine implements AudioEngine {
       const onError = () =>
         settle(() => {
           const code = this.audio.error?.code;
-          // 1=aborted 2=network 3=decode 4=src not supported
           const hints: Record<number, string> = {
             1: "aborted",
             2: "network error",
@@ -84,21 +110,27 @@ export class Html5AudioEngine implements AudioEngine {
       const cleanup = () => {
         this.audio.removeEventListener("canplay", onReady);
         this.audio.removeEventListener("loadedmetadata", onReady);
+        this.audio.removeEventListener("canplaythrough", onReady);
         this.audio.removeEventListener("error", onError);
         clearTimeout(timer);
       };
 
-      // Long audiobooks may take a moment for metadata
       const timer = setTimeout(() => {
-        // If network is slow but no error, allow play to proceed after timeout
-        // when we at least have a src assigned.
-        if (!settled && this.audio.src) {
-          settle(() => resolve());
+        // Transcodes can be slow to produce frames; if we have duration, proceed.
+        if (!settled && token === this.loadToken && this.audio.src) {
+          if (Number.isFinite(this.audio.duration) && this.audio.duration > 0) {
+            settle(() => resolve());
+          } else {
+            settle(() =>
+              reject(new Error("Failed to load audio (timeout waiting for stream)")),
+            );
+          }
         }
-      }, 20_000);
+      }, 45_000);
 
       this.audio.addEventListener("canplay", onReady);
       this.audio.addEventListener("loadedmetadata", onReady);
+      this.audio.addEventListener("canplaythrough", onReady);
       this.audio.addEventListener("error", onError);
       this.audio.src = url;
       this.audio.load();
@@ -115,8 +147,37 @@ export class Html5AudioEngine implements AudioEngine {
 
   seek(seconds: number): void {
     if (Number.isFinite(seconds)) {
-      this.audio.currentTime = Math.max(0, seconds);
+      try {
+        this.audio.currentTime = Math.max(0, seconds);
+      } catch {
+        /* ignore seek errors on live progressive streams */
+      }
     }
+  }
+
+  async seekAndWait(seconds: number, timeoutMs = 8000): Promise<void> {
+    if (!Number.isFinite(seconds)) return;
+    const target = Math.max(0, seconds);
+    if (Math.abs(this.audio.currentTime - target) < 0.35) return;
+
+    await new Promise<void>((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        this.audio.removeEventListener("seeked", onSeeked);
+        clearTimeout(timer);
+        resolve();
+      };
+      const onSeeked = () => finish();
+      const timer = setTimeout(finish, timeoutMs);
+      this.audio.addEventListener("seeked", onSeeked);
+      try {
+        this.audio.currentTime = target;
+      } catch {
+        finish();
+      }
+    });
   }
 
   setRate(rate: number): void {
@@ -137,9 +198,7 @@ export class Html5AudioEngine implements AudioEngine {
   }
 
   destroy(): void {
-    this.audio.pause();
-    this.audio.removeAttribute("src");
-    this.audio.load();
+    this.reset();
     this.listeners.clear();
   }
 
