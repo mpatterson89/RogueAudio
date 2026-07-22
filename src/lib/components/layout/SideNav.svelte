@@ -47,7 +47,7 @@
   <div class="space-y-2 border-t border-ra-border p-2">
     <button
       type="button"
-      class="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl px-3 text-sm font-medium text-ra-muted transition-colors hover:bg-ra-surface-2 hover:text-ra-text sm:justify-start"
+      class="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm font-medium text-ra-muted transition-colors hover:bg-ra-surface-2 hover:text-ra-text"
       onclick={() => settings.togglePlayerBar()}
       title={$settings.playerBarVisible ? "Hide player" : "Show player"}
       aria-pressed={$settings.playerBarVisible}
@@ -56,8 +56,11 @@
       <span class="text-base" aria-hidden="true"
         >{$settings.playerBarVisible ? "▼" : "▲"}</span
       >
+      <span class="hidden min-w-0 truncate sm:inline">
+        {$settings.playerBarVisible ? "Hide player" : "Show player"}
+      </span>
       {#if !$settings.playerBarVisible && $player.playing}
-        <span class="eq-nav" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span class="eq-nav shrink-0" aria-hidden="true"><i></i><i></i><i></i></span>
       {/if}
     </button>
 
