@@ -47,7 +47,7 @@
   <div class="space-y-2 border-t border-ra-border p-2">
     <button
       type="button"
-      class="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm font-medium text-ra-muted transition-colors hover:bg-ra-surface-2 hover:text-ra-text"
+      class="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl px-3 text-sm font-medium text-ra-muted transition-colors hover:bg-ra-surface-2 hover:text-ra-text sm:justify-start"
       onclick={() => settings.togglePlayerBar()}
       title={$settings.playerBarVisible ? "Hide player" : "Show player"}
       aria-pressed={$settings.playerBarVisible}
@@ -56,11 +56,8 @@
       <span class="text-base" aria-hidden="true"
         >{$settings.playerBarVisible ? "▼" : "▲"}</span
       >
-      <span class="hidden sm:inline">
-        {$settings.playerBarVisible ? "Hide player" : "Show player"}
-      </span>
       {#if !$settings.playerBarVisible && $player.playing}
-        <span class="hidden text-[10px] text-ra-accent sm:inline">playing</span>
+        <span class="eq-nav" aria-hidden="true"><i></i><i></i><i></i></span>
       {/if}
     </button>
 
@@ -80,3 +77,39 @@
     </div>
   </div>
 </aside>
+
+<style>
+  .eq-nav {
+    display: flex;
+    align-items: flex-end;
+    gap: 2px;
+    height: 12px;
+  }
+  .eq-nav i {
+    display: block;
+    width: 2.5px;
+    border-radius: 1px;
+    background: var(--color-ra-accent);
+    animation: ra-eq 0.9s ease-in-out infinite;
+  }
+  .eq-nav i:nth-child(1) {
+    height: 40%;
+  }
+  .eq-nav i:nth-child(2) {
+    height: 80%;
+    animation-delay: 0.15s;
+  }
+  .eq-nav i:nth-child(3) {
+    height: 55%;
+    animation-delay: 0.3s;
+  }
+  @keyframes ra-eq {
+    0%,
+    100% {
+      transform: scaleY(0.45);
+    }
+    50% {
+      transform: scaleY(1);
+    }
+  }
+</style>

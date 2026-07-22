@@ -26,20 +26,14 @@
     >
       <button
         type="button"
-        class="inline-flex min-h-11 items-center gap-2 rounded-full border border-ra-border bg-ra-surface-2 px-4 text-sm font-medium text-ra-text transition hover:border-ra-accent hover:bg-ra-accent-soft"
+        class="inline-flex min-h-11 min-w-11 items-center justify-center gap-2 rounded-full border border-ra-border bg-ra-surface-2 px-3 text-sm font-medium text-ra-text transition hover:border-ra-accent hover:bg-ra-accent-soft"
         onclick={() => settings.patch({ playerBarVisible: true })}
-        title="Show player"
+        title={$player.book ? `Show player · ${$player.book.title}` : "Show player"}
         aria-label="Show player"
       >
         <span class="text-base" aria-hidden="true">▲</span>
-        <span>Show player</span>
-        {#if $player.book}
-          <span class="max-w-[12rem] truncate text-xs text-ra-muted">
-            · {$player.book.title}
-          </span>
-          {#if $player.playing}
-            <span class="eq" aria-hidden="true"><i></i><i></i><i></i></span>
-          {/if}
+        {#if $player.playing}
+          <span class="eq" aria-hidden="true"><i></i><i></i><i></i></span>
         {/if}
       </button>
     </div>
