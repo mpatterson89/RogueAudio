@@ -125,13 +125,17 @@ function withQuery(url: string, patch: Record<string, string | null>): string {
 
 /**
  * Progressive transcoder streams often won't HTML5-seek. Prefer baking
- * start offset into the URL (milliseconds). Always mint a fresh session.
+ * start offset into the URL.
+ *
+ * IMPORTANT: Plex universal transcoder `offset` is in **seconds**, not ms.
+ * Sending chapter startTimeOffset (ms) as offset seeks past EOF → empty
+ * stream → WebKit media error 4.
  */
 function streamUrlAt(url: string, offsetSec: number): string {
-  const ms = Math.max(0, Math.floor(offsetSec * 1000));
+  const sec = Math.max(0, Math.floor(offsetSec));
   return withQuery(url, {
     session: crypto.randomUUID(),
-    offset: ms > 250 ? String(ms) : null,
+    offset: sec >= 1 ? String(sec) : null,
   });
 }
 
