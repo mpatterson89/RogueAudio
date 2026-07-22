@@ -1,5 +1,7 @@
 use super::client::{client_identifier, plex_tv_get_json, plex_tv_post_json};
-use super::identity::PLEX_PRODUCT;
+use super::identity::{
+    PLEX_DEVICE, PLEX_PLATFORM, PLEX_PLATFORM_VERSION, PLEX_PRODUCT, PLEX_VERSION,
+};
 use super::models::{AuthStatus, PinAuthPoll, PinAuthStart};
 use crate::error::{AppError, AppResult};
 use crate::storage::config::AppConfig;
@@ -40,7 +42,6 @@ struct PinResponse {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PlexUser {
-    /// Preferred display field when present.
     #[serde(default)]
     friendly_name: Option<String>,
     #[serde(default)]
@@ -51,34 +52,64 @@ struct PlexUser {
     email: Option<String>,
 }
 
-fn urlencoding_minimal(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
-            _ => format!("%{:02X}", c as u8),
-        })
-        .collect()
+fn urlencoding_form(s: &str) -> String {
+    // application/x-www-form-urlencoded style (spaces as %20)
+    let mut out = String::with_capacity(s.len() * 2);
+    for b in s.as_bytes() {
+        match *b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
-fn auth_url(client_id: &str, code: &str) -> String {
-    // Forward-auth URL used by official / third-party clients.
-    // User can also enter `code` manually at https://plex.tv/link
-    format!(
-        "https://app.plex.tv/auth#?clientID={client_id}&code={code}&context%5Bdevice%5D%5Bproduct%5D={product}",
-        client_id = urlencoding_minimal(client_id),
-        code = urlencoding_minimal(code),
-        product = urlencoding_minimal(PLEX_PRODUCT),
-    )
-}
-
-/// Start PIN auth via POST https://plex.tv/api/v2/pins
+/// Build the Plex OAuth URL.
 ///
-/// Uses a short 4-character code so users can type it at https://plex.tv/link.
-/// (`strong=true` returns a long code for the browser auth# flow only.)
+/// Critical: path must be `/auth/#!?` (hashbang), not `/auth#?`.
+/// Matches python-plexapi `MyPlexPinLogin.oauthUrl()`.
+fn oauth_url(client_id: &str, code: &str) -> String {
+    let mut q = String::new();
+    let push = |q: &mut String, key: &str, value: &str| {
+        if !q.is_empty() {
+            q.push('&');
+        }
+        q.push_str(&urlencoding_form(key));
+        q.push('=');
+        q.push_str(&urlencoding_form(value));
+    };
+
+    push(&mut q, "clientID", client_id);
+    push(&mut q, "code", code);
+    push(&mut q, "context[device][product]", PLEX_PRODUCT);
+    push(&mut q, "context[device][version]", PLEX_VERSION);
+    push(&mut q, "context[device][platform]", PLEX_PLATFORM);
+    push(
+        &mut q,
+        "context[device][platformVersion]",
+        PLEX_PLATFORM_VERSION,
+    );
+    push(&mut q, "context[device][device]", PLEX_DEVICE);
+    push(&mut q, "context[device][deviceName]", PLEX_DEVICE);
+
+    format!("https://app.plex.tv/auth/#!?{q}")
+}
+
+/// Start OAuth-style PIN auth: POST https://plex.tv/api/v2/pins?strong=true
+///
+/// Strong codes are long secrets used only with the app.plex.tv/auth browser flow —
+/// not typed at plex.tv/link.
 pub async fn start_pin_auth(state: &PlexAuthState) -> AppResult<PinAuthStart> {
     let client_id = client_identifier()?;
 
-    let pin: PinResponse = plex_tv_post_json("/api/v2/pins", None).await?;
+    let pin: PinResponse = plex_tv_post_json("/api/v2/pins?strong=true", None).await?;
+
+    let cid = pin
+        .client_identifier
+        .clone()
+        .unwrap_or_else(|| client_id.clone());
 
     let mut guard = state
         .pending
@@ -87,17 +118,13 @@ pub async fn start_pin_auth(state: &PlexAuthState) -> AppResult<PinAuthStart> {
     *guard = Some(PendingPin {
         id: pin.id,
         code: pin.code.clone(),
-        client_id: pin
-            .client_identifier
-            .clone()
-            .unwrap_or_else(|| client_id.clone()),
+        client_id: cid.clone(),
     });
 
-    let cid = pin.client_identifier.as_deref().unwrap_or(&client_id);
     Ok(PinAuthStart {
         id: pin.id,
         code: pin.code.clone(),
-        auth_url: auth_url(cid, &pin.code),
+        auth_url: oauth_url(&cid, &pin.code),
     })
 }
 

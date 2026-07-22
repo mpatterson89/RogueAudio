@@ -2,21 +2,7 @@
   import { auth } from "$lib/stores/auth";
   import { openUrl } from "@tauri-apps/plugin-opener";
 
-  let copied = $state(false);
-
-  async function openAuthPage() {
-    if ($auth.pin?.authUrl) {
-      try {
-        await openUrl($auth.pin.authUrl);
-      } catch {
-        // Outside Tauri or opener failed — user can use plex.tv/link + code
-        window.open($auth.pin.authUrl, "_blank");
-      }
-    }
-  }
-
-  async function openLinkPage() {
-    const url = "https://plex.tv/link";
+  async function openInBrowser(url: string) {
     try {
       await openUrl(url);
     } catch {
@@ -24,15 +10,17 @@
     }
   }
 
-  async function copyCode() {
-    if (!$auth.pin?.code) return;
-    try {
-      await navigator.clipboard.writeText($auth.pin.code);
-      copied = true;
-      setTimeout(() => (copied = false), 2000);
-    } catch {
-      /* ignore */
+  async function openAuthPage() {
+    if ($auth.pin?.authUrl) {
+      await openInBrowser($auth.pin.authUrl);
     }
+  }
+
+  async function startAndOpen() {
+    await auth.startPin();
+    // Auto-open the OAuth page — strong PINs are not typed at plex.tv/link
+    const url = $auth.pin?.authUrl;
+    if (url) await openInBrowser(url);
   }
 </script>
 
@@ -40,8 +28,8 @@
   <header class="space-y-2">
     <h1 class="text-2xl font-semibold tracking-tight">Connect to Plex</h1>
     <p class="text-sm leading-relaxed text-ra-muted">
-      Sign in with a PIN from plex.tv to access your self-hosted audiobook libraries.
-      RogueAudio never talks to Audible or any DRM service.
+      Sign in through plex.tv in your browser. RogueAudio only talks to your account and
+      self-hosted servers — never Audible or DRM stores.
     </p>
   </header>
 
@@ -60,63 +48,62 @@
   {:else}
     <div class="space-y-4 rounded-2xl border border-ra-border bg-ra-surface p-5">
       {#if $auth.pin}
-        <div class="text-center">
-          <p class="text-xs uppercase tracking-wide text-ra-muted">Your PIN</p>
-          <button
-            type="button"
-            class="mt-2 font-mono text-4xl font-bold tracking-[0.3em] text-ra-accent"
-            onclick={copyCode}
-            title="Copy PIN"
-          >
-            {$auth.pin.code}
-          </button>
-          <p class="mt-1 text-xs text-ra-muted">
-            {copied ? "Copied!" : "Tap PIN to copy"}
-          </p>
-          <p class="mt-3 text-sm text-ra-muted">
-            Enter this code at
-            <button
-              type="button"
-              class="font-medium text-ra-accent underline-offset-2 hover:underline"
-              onclick={openLinkPage}
-            >
-              plex.tv/link
-            </button>
+        <div class="space-y-3 text-center">
+          <p class="text-sm text-ra-muted">
+            A browser window should open for Plex login.
             {#if $auth.polling}
-              <span class="ml-1 animate-pulse">· waiting for approval…</span>
+              <span class="animate-pulse">Waiting for approval…</span>
             {/if}
           </p>
-          <div class="mt-4 flex flex-col gap-2 sm:flex-row sm:justify-center">
+          <p class="text-xs text-ra-muted/80">
+            If nothing opened, use the button below. Stay signed in on plex.tv, then
+            approve <strong class="text-ra-text">RogueAudio</strong>.
+          </p>
+          <div class="flex flex-col gap-2 sm:flex-row sm:justify-center">
             <button
               type="button"
               class="min-h-11 rounded-xl bg-ra-accent px-5 text-sm font-medium text-white hover:bg-ra-accent-hover"
               onclick={openAuthPage}
             >
-              Open Plex authorization
+              Open Plex login again
             </button>
             <button
               type="button"
               class="min-h-11 rounded-xl border border-ra-border px-5 text-sm text-ra-muted hover:border-ra-accent hover:text-ra-text"
-              onclick={() => auth.startPin()}
+              onclick={startAndOpen}
             >
-              Get a new PIN
+              Start over
             </button>
           </div>
+          <details class="pt-2 text-left text-xs text-ra-muted">
+            <summary class="cursor-pointer select-none hover:text-ra-text">
+              Technical details
+            </summary>
+            <p class="mt-2 break-all font-mono text-[11px] opacity-80">
+              PIN id: {$auth.pin.id}
+            </p>
+            <p class="mt-1 break-all font-mono text-[11px] opacity-60">
+              {$auth.pin.authUrl}
+            </p>
+          </details>
         </div>
       {:else}
         <button
           type="button"
           class="min-h-12 w-full rounded-xl bg-ra-accent text-sm font-semibold text-white hover:bg-ra-accent-hover disabled:opacity-50"
           disabled={$auth.loading}
-          onclick={() => auth.startPin()}
+          onclick={startAndOpen}
         >
-          {$auth.loading ? "Contacting plex.tv…" : "Sign in with Plex PIN"}
+          {$auth.loading ? "Contacting plex.tv…" : "Sign in with Plex"}
         </button>
+        <p class="text-center text-xs text-ra-muted">
+          Opens the official Plex authorization page in your browser.
+        </p>
       {/if}
 
       <div class="border-t border-ra-border pt-4">
         <p class="mb-2 text-xs text-ra-muted">
-          Development only — explore the UI without a live Plex account (stub data).
+          Development only — explore the UI with sample data (no plex.tv).
         </p>
         <button
           type="button"
