@@ -45,8 +45,11 @@
 
   <div class="border-t border-ra-border p-3 text-xs text-ra-muted">
     {#if $auth.status.authenticated}
-      <p class="hidden truncate sm:block" title={$auth.status.username ?? "Signed in"}>
-        {$auth.status.username ?? "Signed in"}
+      <p
+        class="hidden truncate sm:block"
+        title={$auth.status.username?.trim() || "Signed in"}
+      >
+        {$auth.status.username?.trim() || "Signed in"}
       </p>
       <p class="sm:hidden text-center" title="Signed in">●</p>
     {:else}

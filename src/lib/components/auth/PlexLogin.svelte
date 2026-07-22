@@ -36,7 +36,9 @@
   {#if $auth.status.authenticated}
     <div class="rounded-2xl border border-ra-border bg-ra-surface p-5">
       <p class="text-sm text-ra-muted">Signed in as</p>
-      <p class="mt-1 text-lg font-semibold">{$auth.status.username ?? "Plex user"}</p>
+      <p class="mt-1 text-lg font-semibold">
+        {$auth.status.username?.trim() || "Plex user"}
+      </p>
       <button
         type="button"
         class="mt-4 min-h-11 rounded-xl border border-ra-border px-4 text-sm hover:border-ra-danger hover:text-ra-danger"

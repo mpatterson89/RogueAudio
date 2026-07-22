@@ -132,12 +132,11 @@ pub async fn start_pin_auth(state: &PlexAuthState) -> AppResult<PinAuthStart> {
 pub async fn poll_pin_auth(state: &PlexAuthState) -> AppResult<PinAuthPoll> {
     let cfg = AppConfig::load()?;
     if cfg.plex_token.is_some() {
+        // Backfill display name if an earlier login saved an empty friendlyName.
+        let status = auth_status().await?;
         return Ok(PinAuthPoll {
             authorized: true,
-            status: AuthStatus {
-                authenticated: true,
-                username: cfg.plex_username,
-            },
+            status,
         });
     }
 
@@ -163,7 +162,14 @@ pub async fn poll_pin_auth(state: &PlexAuthState) -> AppResult<PinAuthPoll> {
     let pin: PinResponse = plex_tv_get_json(&path, None).await?;
 
     if let Some(token) = pin.auth_token.filter(|t| !t.is_empty()) {
-        let username = fetch_username(&token).await.ok();
+        let username = match fetch_username(&token).await {
+            Ok(name) => Some(name),
+            Err(e) => {
+                // Keep login successful even if profile lookup fails.
+                eprintln!("plex username fetch failed: {e}");
+                None
+            }
+        };
         let mut cfg = AppConfig::load()?;
         cfg.plex_token = Some(token);
         cfg.plex_username = username.clone();
@@ -193,14 +199,20 @@ pub async fn poll_pin_auth(state: &PlexAuthState) -> AppResult<PinAuthPoll> {
     })
 }
 
+fn non_empty(s: Option<String>) -> Option<String> {
+    s.map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// Plex often returns `friendlyName: ""` even when `username` is set.
+/// Prefer the first non-empty display field.
 async fn fetch_username(token: &str) -> AppResult<String> {
     let user: PlexUser = plex_tv_get_json("/api/v2/user", Some(token)).await?;
-    Ok(user
-        .friendly_name
-        .or(user.username)
-        .or(user.title)
-        .or(user.email)
-        .unwrap_or_else(|| "Plex user".into()))
+    non_empty(user.username)
+        .or_else(|| non_empty(user.title))
+        .or_else(|| non_empty(user.friendly_name))
+        .or_else(|| non_empty(user.email))
+        .ok_or_else(|| AppError::Message("plex user profile had no display name".into()))
 }
 
 /// Development helper: simulate successful PIN authorization (no plex.tv).
@@ -234,10 +246,47 @@ pub fn logout() -> AppResult<()> {
     Ok(())
 }
 
-pub fn auth_status() -> AppResult<AuthStatus> {
-    let cfg = AppConfig::load()?;
+/// Fast local check (no network) — for guarding library/stream commands.
+pub fn is_authenticated() -> bool {
+    AppConfig::load()
+        .ok()
+        .and_then(|c| c.plex_token)
+        .map(|t| !t.is_empty())
+        .unwrap_or(false)
+}
+
+/// Full status for the UI; backfills username when missing/empty.
+pub async fn auth_status() -> AppResult<AuthStatus> {
+    let mut cfg = AppConfig::load()?;
+    let Some(token) = cfg.plex_token.clone() else {
+        return Ok(AuthStatus {
+            authenticated: false,
+            username: None,
+        });
+    };
+
+    if token.is_empty() {
+        return Ok(AuthStatus {
+            authenticated: false,
+            username: None,
+        });
+    }
+
+    let needs_name = cfg
+        .plex_username
+        .as_ref()
+        .map(|u| u.trim().is_empty())
+        .unwrap_or(true);
+
+    if needs_name {
+        if let Ok(name) = fetch_username(&token).await {
+            cfg.plex_username = Some(name);
+            let _ = cfg.save();
+        }
+    }
+
     Ok(AuthStatus {
-        authenticated: cfg.plex_token.is_some(),
-        username: cfg.plex_username,
+        authenticated: true,
+        username: non_empty(cfg.plex_username),
     })
 }

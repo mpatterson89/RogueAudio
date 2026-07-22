@@ -22,8 +22,8 @@ pub fn plex_logout() -> AppResult<()> {
 }
 
 #[tauri::command]
-pub fn plex_auth_status() -> AppResult<AuthStatus> {
-    plex::auth_status()
+pub async fn plex_auth_status() -> AppResult<AuthStatus> {
+    plex::auth_status().await
 }
 
 /// Debug-only helper so the UI can be exercised without a live Plex account.
@@ -47,8 +47,7 @@ pub fn plex_dev_complete_auth(
 
 #[tauri::command]
 pub fn plex_list_servers() -> AppResult<Vec<PlexServer>> {
-    let status = plex::auth_status()?;
-    if !status.authenticated {
+    if !plex::is_authenticated() {
         return Err(crate::error::AppError::NotAuthenticated);
     }
 
@@ -73,8 +72,7 @@ pub fn plex_list_servers() -> AppResult<Vec<PlexServer>> {
 /// music-type libraries. When more than one exists, the frontend shows a filter.
 #[tauri::command]
 pub fn plex_list_libraries(_server_id: String) -> AppResult<Vec<PlexLibrary>> {
-    let status = plex::auth_status()?;
-    if !status.authenticated {
+    if !plex::is_authenticated() {
         return Err(crate::error::AppError::NotAuthenticated);
     }
 
@@ -120,8 +118,7 @@ pub fn plex_list_books(
     library_key: String,
     query: Option<String>,
 ) -> AppResult<Vec<AudiobookSummary>> {
-    let status = plex::auth_status()?;
-    if !status.authenticated {
+    if !plex::is_authenticated() {
         return Err(crate::error::AppError::NotAuthenticated);
     }
 
@@ -150,8 +147,7 @@ pub fn plex_get_stream(
     _server_id: String,
     rating_key: String,
 ) -> AppResult<StreamInfo> {
-    let status = plex::auth_status()?;
-    if !status.authenticated {
+    if !plex::is_authenticated() {
         return Err(crate::error::AppError::NotAuthenticated);
     }
 
