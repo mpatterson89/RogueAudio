@@ -277,18 +277,14 @@ fn extract_chapters_from_node(node: &Value) -> Vec<RawChapter> {
 }
 
 fn parse_chapter(ch: &Value) -> Option<RawChapter> {
-    let start = ch
-        .get("startTimeOffset")
-        .and_then(|v| v.as_u64())
-        .or_else(|| ch.get("startTimeOffset").and_then(|v| v.as_i64()).map(|i| i as u64))?;
-    let end = ch
-        .get("endTimeOffset")
-        .and_then(|v| v.as_u64())
-        .or_else(|| ch.get("endTimeOffset").and_then(|v| v.as_i64()).map(|i| i as u64));
-    let index = ch.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
+    let start = json_u64(ch.get("startTimeOffset"))?;
+    let end = json_u64(ch.get("endTimeOffset"));
+    let index = json_u64(ch.get("index")).unwrap_or(0);
+    // Plex audiobook chapters use `tag` for the name (e.g. "Opening Credits").
     let title = ch
-        .get("title")
+        .get("tag")
         .and_then(|v| v.as_str())
+        .or_else(|| ch.get("title").and_then(|v| v.as_str()))
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| format!("Chapter {index}"));
@@ -298,4 +294,12 @@ fn parse_chapter(ch: &Value) -> Option<RawChapter> {
         start_ms: start,
         end_ms: end,
     })
+}
+
+fn json_u64(v: Option<&Value>) -> Option<u64> {
+    let v = v?;
+    v.as_u64()
+        .or_else(|| v.as_i64().map(|i| i.max(0) as u64))
+        .or_else(|| v.as_f64().map(|f| f.max(0.0) as u64))
+        .or_else(|| v.as_str()?.parse().ok())
 }
