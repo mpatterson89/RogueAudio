@@ -119,5 +119,12 @@ export interface SleepTimerState {
   minutes: number;
   /** Epoch ms when timer should fire (duration mode) */
   endsAt: number | null;
+  /**
+   * Book-timeline position (ms) where end-of-chapter sleep should stop.
+   * From Plex chapter endTimeOffset / next chapter start, not a wall-clock duration.
+   */
+  chapterEndMs: number | null;
+  /** Label of the chapter we're sleeping through (UI). */
+  chapterTitle: string | null;
   fadeSeconds: number;
 }

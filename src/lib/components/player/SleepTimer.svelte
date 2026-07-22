@@ -2,8 +2,11 @@
   import { player } from "$lib/stores/player";
 
   let open = $state(false);
-  let customMinutes = $state("20");
+  /** Bound to number input — may be number | string depending on browser/Svelte */
+  let customMinutes = $state<string | number>(20);
   let customError = $state<string | null>(null);
+  let applyingCustom = $state(false);
+  let applyingChapter = $state(false);
 
   const PRESETS = [15, 30, 45, 60, 90] as const;
   const MIN_MINUTES = 1;
@@ -18,7 +21,7 @@
     return `${m}:${s.toString().padStart(2, "0")}`;
   });
 
-  // tick label
+  // tick remaining countdown label
   $effect(() => {
     if ($player.sleep.mode !== "duration") return;
     const id = setInterval(() => {
@@ -34,28 +37,61 @@
     open = false;
   }
 
+  function parseCustomMinutes(): number | null {
+    const raw =
+      typeof customMinutes === "number"
+        ? customMinutes
+        : Number(String(customMinutes ?? "").trim());
+    if (!Number.isFinite(raw)) return null;
+    // Accept 20 or 20.0 from number inputs
+    const n = Math.round(raw);
+    if (Math.abs(raw - n) > 1e-9) return null;
+    if (n < MIN_MINUTES || n > MAX_MINUTES) return null;
+    return n;
+  }
+
   function applyCustom(e?: Event) {
     e?.preventDefault();
-    const raw = customMinutes.trim();
-    const n = Number(raw);
-    if (!raw || !Number.isFinite(n) || !Number.isInteger(n)) {
-      customError = "Enter a whole number";
+    e?.stopPropagation();
+    const n = parseCustomMinutes();
+    if (n == null) {
+      const raw =
+        typeof customMinutes === "number"
+          ? customMinutes
+          : Number(String(customMinutes ?? "").trim());
+      if (!Number.isFinite(raw)) {
+        customError = "Enter a whole number";
+      } else if (raw < MIN_MINUTES || raw > MAX_MINUTES) {
+        customError = `${MIN_MINUTES}–${MAX_MINUTES} min`;
+      } else {
+        customError = "Enter a whole number";
+      }
       return;
     }
-    if (n < MIN_MINUTES || n > MAX_MINUTES) {
-      customError = `${MIN_MINUTES}–${MAX_MINUTES} min`;
-      return;
+    applyingCustom = true;
+    try {
+      setMinutes(n);
+    } finally {
+      applyingCustom = false;
     }
-    setMinutes(n);
+  }
+
+  async function applyEndOfChapter() {
+    applyingChapter = true;
+    try {
+      await player.setSleepEndOfChapter();
+      open = false;
+    } finally {
+      applyingChapter = false;
+    }
   }
 
   function openMenu() {
     open = !open;
     if (open) {
       customError = null;
-      // Prefill with current sleep minutes when a duration timer is active
       if ($player.sleep.mode === "duration" && $player.sleep.minutes > 0) {
-        customMinutes = String($player.sleep.minutes);
+        customMinutes = $player.sleep.minutes;
       }
     }
   }
@@ -81,7 +117,6 @@
   </button>
 
   {#if open}
-    <!-- Backdrop + menu use high z-index so they sit above book view layers -->
     <button
       type="button"
       class="fixed inset-0 z-[300] cursor-default bg-transparent"
@@ -91,6 +126,7 @@
     <div
       class="absolute bottom-full right-0 z-[310] mb-2 w-56 rounded-xl border border-ra-border bg-ra-surface p-2 shadow-2xl ring-1 ring-white/10"
       role="menu"
+      onclick={(e) => e.stopPropagation()}
     >
       <p class="px-2 pb-1 text-[11px] font-medium uppercase tracking-wide text-ra-muted">
         Sleep timer
@@ -108,11 +144,12 @@
 
       <div class="my-1 border-t border-ra-border"></div>
 
-      <form
-        class="flex flex-col gap-1.5 px-1 py-1.5"
-        onsubmit={applyCustom}
-      >
-        <label class="px-1 text-[11px] font-medium uppercase tracking-wide text-ra-muted" for="sleep-custom-min">
+      <!-- type=button Set avoids form/menu quirks; parse handles number|string bind -->
+      <div class="flex flex-col gap-1.5 px-1 py-1.5">
+        <label
+          class="px-1 text-[11px] font-medium uppercase tracking-wide text-ra-muted"
+          for="sleep-custom-min"
+        >
           Custom
         </label>
         <div class="flex items-center gap-1.5">
@@ -125,15 +162,22 @@
             step="1"
             class="min-h-10 w-full min-w-0 rounded-lg border border-ra-border bg-ra-surface-2 px-2 text-sm text-ra-text tabular-nums focus:border-ra-accent focus:outline-none"
             bind:value={customMinutes}
-            onclick={(e) => e.stopPropagation()}
-            onkeydown={(e) => e.stopPropagation()}
+            onkeydown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Enter") {
+                e.preventDefault();
+                applyCustom();
+              }
+            }}
             aria-invalid={customError ? true : undefined}
             aria-describedby={customError ? "sleep-custom-error" : undefined}
           />
           <span class="shrink-0 text-xs text-ra-muted">min</span>
           <button
-            type="submit"
-            class="min-h-10 shrink-0 rounded-lg bg-ra-accent px-3 text-sm font-semibold text-white hover:bg-ra-accent-hover"
+            type="button"
+            class="min-h-10 shrink-0 rounded-lg bg-ra-accent px-3 text-sm font-semibold text-white hover:bg-ra-accent-hover disabled:opacity-60"
+            disabled={applyingCustom}
+            onclick={applyCustom}
           >
             Set
           </button>
@@ -141,21 +185,29 @@
         {#if customError}
           <p id="sleep-custom-error" class="px-1 text-[11px] text-ra-danger">{customError}</p>
         {/if}
-      </form>
+      </div>
 
       <div class="my-1 border-t border-ra-border"></div>
 
       <button
         type="button"
         role="menuitem"
-        class="flex min-h-10 w-full items-center rounded-lg px-2 text-left text-sm hover:bg-ra-surface-2"
-        onclick={() => {
-          player.setSleepEndOfChapter();
-          open = false;
-        }}
+        class="flex min-h-10 w-full items-center gap-2 rounded-lg px-2 text-left text-sm hover:bg-ra-surface-2 disabled:opacity-60"
+        disabled={applyingChapter || !$player.book}
+        onclick={applyEndOfChapter}
       >
-        End of chapter
+        {#if applyingChapter}
+          <span class="ra-spinner" aria-hidden="true"></span>
+          Finding chapter…
+        {:else}
+          End of chapter
+        {/if}
       </button>
+      {#if $player.sleep.mode === "end_of_chapter" && $player.sleep.chapterTitle}
+        <p class="px-2 pb-1 text-[11px] text-ra-muted">
+          Stops after: {$player.sleep.chapterTitle}
+        </p>
+      {/if}
       <button
         type="button"
         role="menuitem"

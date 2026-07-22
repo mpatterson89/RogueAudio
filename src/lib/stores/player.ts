@@ -39,6 +39,8 @@ const initialSleep: SleepTimerState = {
   mode: "off",
   minutes: 30,
   endsAt: null,
+  chapterEndMs: null,
+  chapterTitle: null,
   fadeSeconds: 15,
 };
 
@@ -255,23 +257,103 @@ function createPlayerStore() {
     }
   }
 
+  function fireSleepStop() {
+    engine.pause();
+    void flushProgress("paused");
+    update((st) => ({
+      ...st,
+      playing: false,
+      sleep: { ...initialSleep },
+    }));
+    clearSleepTimer();
+    stopProgressLoop();
+  }
+
   function armSleepWatcher() {
     clearSleepTimer();
     sleepInterval = setInterval(() => {
       const s = get(store);
-      if (s.sleep.mode !== "duration" || !s.sleep.endsAt) return;
-      if (s.sleep.endsAt - Date.now() <= 0) {
-        engine.pause();
-        void flushProgress("paused");
-        update((st) => ({
-          ...st,
-          playing: false,
-          sleep: { ...st.sleep, mode: "off", endsAt: null },
-        }));
-        clearSleepTimer();
-        stopProgressLoop();
+      if (s.sleep.mode === "off") return;
+
+      // Wall-clock timer (custom / preset minutes)
+      if (s.sleep.mode === "duration" && s.sleep.endsAt != null) {
+        if (s.sleep.endsAt - Date.now() <= 0) {
+          fireSleepStop();
+        }
+        return;
       }
-    }, 500);
+
+      // End of current chapter — uses Plex chapter timestamps on the book timeline
+      if (s.sleep.mode === "end_of_chapter" && s.sleep.chapterEndMs != null) {
+        const posMs = s.positionSec * 1000;
+        // Small grace so we don't fire immediately if we're already at the boundary
+        if (posMs >= s.sleep.chapterEndMs - 250) {
+          fireSleepStop();
+        }
+      }
+    }, 400);
+  }
+
+  /**
+   * Resolve where the current chapter ends on the book timeline (ms).
+   * Prefer Plex embedded chapter markers; fall back to end of current track/part.
+   */
+  async function resolveChapterEnd(): Promise<{ endMs: number; title: string | null }> {
+    const s = get(store);
+    const posMs = Math.max(0, s.positionSec * 1000);
+    const bookDurMs = s.durationSec > 0 ? Math.floor(s.durationSec * 1000) : null;
+
+    // 1) Embedded / multi-file chapters from Plex book detail
+    if (s.book && s.serverId) {
+      try {
+        const detail = await plexApi.getBookDetail(s.serverId, s.book.ratingKey);
+        const chapters = detail.chapters ?? [];
+        if (chapters.length > 0) {
+          for (let i = 0; i < chapters.length; i++) {
+            const ch = chapters[i];
+            const start = ch.startMs;
+            const end =
+              ch.endMs ??
+              chapters[i + 1]?.startMs ??
+              detail.durationMs ??
+              bookDurMs ??
+              start;
+            // Current chapter: position is within [start, end)
+            // If exactly at end of previous, treat as next chapter's range
+            if (posMs >= start && posMs < end) {
+              return { endMs: end, title: ch.title };
+            }
+          }
+          // Past last start — use last chapter end / book end
+          const last = chapters[chapters.length - 1];
+          const end =
+            last.endMs ?? detail.durationMs ?? bookDurMs ?? last.startMs;
+          return { endMs: end, title: last.title };
+        }
+      } catch {
+        /* fall through to track boundary */
+      }
+    }
+
+    // 2) Fallback: end of the current file/track (multi-part books)
+    const offsets = trackOffsets(s.tracks);
+    const idx = s.trackIndex;
+    const trackStartMs = Math.floor((offsets[idx] ?? 0) * 1000);
+    const trackDur = s.tracks[idx]?.durationMs ?? 0;
+    if (trackDur > 0) {
+      return {
+        endMs: trackStartMs + trackDur,
+        title: s.tracks[idx]?.title ?? `Part ${idx + 1}`,
+      };
+    }
+
+    // 3) Last resort: end of known book duration
+    if (bookDurMs && bookDurMs > posMs) {
+      return { endMs: bookDurMs, title: null };
+    }
+
+    // Nothing useful — stop after a short buffer so the control still does something
+    return { endMs: posMs + 60_000, title: null };
   }
 
   async function loadTrackAt(index: number, seekInTrackSec = 0, autoplay = false) {
@@ -530,26 +612,56 @@ function createPlayerStore() {
     },
 
     setSleepDuration(minutes: number) {
-      const endsAt = Date.now() + minutes * 60 * 1000;
+      const mins = Math.max(1, Math.floor(minutes));
+      const endsAt = Date.now() + mins * 60 * 1000;
       update((s) => ({
         ...s,
-        sleep: { ...s.sleep, mode: "duration", minutes, endsAt },
+        sleep: {
+          ...initialSleep,
+          mode: "duration",
+          minutes: mins,
+          endsAt,
+          fadeSeconds: s.sleep.fadeSeconds,
+        },
       }));
       armSleepWatcher();
     },
 
-    setSleepEndOfChapter() {
-      update((s) => ({
-        ...s,
-        sleep: { ...s.sleep, mode: "end_of_chapter", endsAt: null },
-      }));
+    /**
+     * Stop when the current Plex chapter ends (timestamp markers), not after a
+     * fixed duration. Falls back to end of the current track/part if no markers.
+     */
+    async setSleepEndOfChapter() {
+      const s = get(store);
+      if (!s.book) return;
+      try {
+        const { endMs, title } = await resolveChapterEnd();
+        update((st) => ({
+          ...st,
+          sleep: {
+            ...initialSleep,
+            mode: "end_of_chapter",
+            minutes: 0,
+            endsAt: null,
+            chapterEndMs: endMs,
+            chapterTitle: title,
+            fadeSeconds: st.sleep.fadeSeconds,
+          },
+        }));
+        armSleepWatcher();
+      } catch (e) {
+        update((st) => ({
+          ...st,
+          error: e instanceof Error ? e.message : String(e),
+        }));
+      }
     },
 
     clearSleep() {
       clearSleepTimer();
       update((s) => ({
         ...s,
-        sleep: { ...initialSleep },
+        sleep: { ...initialSleep, fadeSeconds: s.sleep.fadeSeconds },
       }));
     },
 
