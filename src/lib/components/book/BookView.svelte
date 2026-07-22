@@ -284,8 +284,9 @@
             Summary
           </h2>
           <p
-            class="text-sm leading-relaxed text-ra-text/90 sm:text-[15px]
-              {summaryExpanded ? '' : 'line-clamp-5'}"
+            class={summaryExpanded
+              ? "text-sm leading-relaxed text-ra-text/90 sm:text-[15px]"
+              : "line-clamp-5 text-sm leading-relaxed text-ra-text/90 sm:text-[15px]"}
           >
             {detail.summary}
           </p>
@@ -336,22 +337,23 @@
               <li>
                 <button
                   type="button"
-                  class="group flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition
-                    {active
-                    ? 'bg-ra-accent-soft ring-1 ring-ra-accent/40'
-                    : 'hover:bg-white/5'}"
+                  class={active
+                    ? "group flex w-full items-center gap-3 rounded-xl bg-ra-accent-soft px-3 py-2.5 text-left ring-1 ring-ra-accent/40 transition"
+                    : "group flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition hover:bg-white/5"}
                   onclick={() => seekChapter(ch)}
                 >
                   <span
-                    class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-xs font-semibold tabular-nums
-                      {active ? 'bg-ra-accent text-white' : 'bg-white/5 text-ra-muted'}"
+                    class={active
+                      ? "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-ra-accent text-xs font-semibold tabular-nums text-white"
+                      : "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-white/5 text-xs font-semibold tabular-nums text-ra-muted"}
                   >
                     {i + 1}
                   </span>
                   <span class="min-w-0 flex-1">
                     <span
-                      class="block truncate text-sm font-medium
-                        {active ? 'text-ra-text' : 'text-ra-text/90'}"
+                      class={active
+                        ? "block truncate text-sm font-medium text-ra-text"
+                        : "block truncate text-sm font-medium text-ra-text/90"}
                     >
                       {ch.title}
                     </span>

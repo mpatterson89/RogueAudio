@@ -19,6 +19,17 @@
   const canControl = $derived($player.ready && !$player.loading);
   const showPause = $derived($player.playing && !$player.loading);
 
+  // Keep class list in script so Tailwind's CSS scanner doesn't choke on
+  // multi-line template expressions inside class="...".
+  const nowPlayingClass = $derived(
+    [
+      "flex min-w-0 flex-1 items-center gap-3 rounded-xl text-left transition",
+      $player.book
+        ? "cursor-pointer hover:bg-white/5 focus-visible:bg-white/5"
+        : "cursor-default",
+    ].join(" "),
+  );
+
   function openBookView() {
     if (!$player.book || !$player.serverId) return;
     void goto(bookHref($player.serverId, $player.book.ratingKey));
@@ -52,10 +63,7 @@
   >
     <button
       type="button"
-      class="flex min-w-0 flex-1 items-center gap-3 rounded-xl text-left transition
-        {$player.book
-        ? 'hover:bg-white/5 focus-visible:bg-white/5 cursor-pointer'
-        : 'cursor-default'}"
+      class={nowPlayingClass}
       disabled={!$player.book}
       onclick={openBookView}
       title={$player.book ? "Open book view" : undefined}

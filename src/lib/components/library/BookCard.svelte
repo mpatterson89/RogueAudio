@@ -15,13 +15,17 @@
   const durationLabel = $derived(
     book.durationMs ? formatTime(book.durationMs / 1000) : null,
   );
+
+  const cardClass = $derived(
+    selected
+      ? "group flex w-full flex-col overflow-hidden rounded-2xl border border-ra-accent bg-ra-surface text-left ring-1 ring-ra-accent/40 transition hover:border-ra-accent/50 hover:bg-ra-surface-2 focus-visible:border-ra-accent"
+      : "group flex w-full flex-col overflow-hidden rounded-2xl border border-ra-border bg-ra-surface text-left transition hover:border-ra-accent/50 hover:bg-ra-surface-2 focus-visible:border-ra-accent",
+  );
 </script>
 
 <button
   type="button"
-  class="group flex w-full flex-col overflow-hidden rounded-2xl border bg-ra-surface text-left transition
-    hover:border-ra-accent/50 hover:bg-ra-surface-2 focus-visible:border-ra-accent
-    {selected ? 'border-ra-accent ring-1 ring-ra-accent/40' : 'border-ra-border'}"
+  class={cardClass}
   {onclick}
 >
   <div

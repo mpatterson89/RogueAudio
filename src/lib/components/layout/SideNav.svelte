@@ -31,10 +31,9 @@
       {@const active = $page.url.pathname === link.href}
       <a
         href={link.href}
-        class="flex min-h-11 items-center gap-3 rounded-xl px-3 text-sm font-medium transition-colors
-          {active
-          ? 'bg-ra-accent-soft text-ra-text'
-          : 'text-ra-muted hover:bg-ra-surface-2 hover:text-ra-text'}"
+        class={active
+          ? "flex min-h-11 items-center gap-3 rounded-xl bg-ra-accent-soft px-3 text-sm font-medium text-ra-text transition-colors"
+          : "flex min-h-11 items-center gap-3 rounded-xl px-3 text-sm font-medium text-ra-muted transition-colors hover:bg-ra-surface-2 hover:text-ra-text"}
         aria-current={active ? "page" : undefined}
       >
         <span class="text-base" aria-hidden="true">{link.icon}</span>

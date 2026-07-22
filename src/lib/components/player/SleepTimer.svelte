@@ -32,8 +32,9 @@
 <div class="relative">
   <button
     type="button"
-    class="flex min-h-10 min-w-10 items-center gap-1.5 rounded-lg border border-ra-border bg-ra-surface-2 px-2.5 text-sm
-      {$player.sleep.mode !== 'off' ? 'border-ra-accent text-ra-accent' : 'text-ra-text'}"
+    class={$player.sleep.mode !== "off"
+      ? "flex min-h-10 min-w-10 items-center gap-1.5 rounded-lg border border-ra-accent bg-ra-surface-2 px-2.5 text-sm text-ra-accent"
+      : "flex min-h-10 min-w-10 items-center gap-1.5 rounded-lg border border-ra-border bg-ra-surface-2 px-2.5 text-sm text-ra-text"}
     onclick={() => (open = !open)}
     aria-expanded={open}
     aria-haspopup="true"
