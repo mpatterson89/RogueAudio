@@ -49,14 +49,15 @@
   </button>
 
   {#if open}
+    <!-- Backdrop + menu use high z-index so they sit above book view layers -->
     <button
       type="button"
-      class="fixed inset-0 z-40 cursor-default bg-transparent"
+      class="fixed inset-0 z-[300] cursor-default bg-transparent"
       aria-label="Close sleep timer menu"
       onclick={() => (open = false)}
     ></button>
     <div
-      class="absolute bottom-full right-0 z-50 mb-2 w-48 rounded-xl border border-ra-border bg-ra-surface p-2 shadow-xl"
+      class="absolute bottom-full right-0 z-[310] mb-2 w-48 rounded-xl border border-ra-border bg-ra-surface p-2 shadow-2xl ring-1 ring-white/10"
       role="menu"
     >
       <p class="px-2 pb-1 text-[11px] font-medium uppercase tracking-wide text-ra-muted">

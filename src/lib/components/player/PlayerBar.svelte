@@ -46,7 +46,7 @@
 </script>
 
 <footer
-  class="shrink-0 border-t border-ra-border bg-ra-surface/95 backdrop-blur-md"
+  class="relative z-[200] shrink-0 border-t border-ra-border bg-ra-surface/95 backdrop-blur-md"
   aria-label="Player"
 >
   <div class="px-3 pt-2 sm:px-4">

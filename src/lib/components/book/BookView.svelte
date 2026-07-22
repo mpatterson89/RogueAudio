@@ -164,7 +164,8 @@
       ></div>
     </div>
 
-    <div class="relative z-10 mx-auto max-w-5xl px-4 pb-10 pt-4 sm:px-6 sm:pt-6">
+    <!-- Keep page content below the global player chrome (z-[200]+) -->
+    <div class="relative z-0 mx-auto max-w-5xl px-4 pb-10 pt-4 sm:px-6 sm:pt-6">
       <!-- Top bar -->
       <div class="mb-6 flex items-center justify-between gap-3">
         <button type="button" class="btn-ghost" onclick={() => goto("/")}>
