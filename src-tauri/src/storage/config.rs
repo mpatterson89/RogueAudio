@@ -1,4 +1,4 @@
-use super::{config_path};
+use super::config_path;
 use crate::error::AppResult;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -10,6 +10,8 @@ pub struct AppConfig {
     pub plex_token: Option<String>,
     /// Plex account username when known.
     pub plex_username: Option<String>,
+    /// Stable per-install Plex client identifier (UUID).
+    pub plex_client_id: Option<String>,
     /// Preferred server machine identifier.
     pub preferred_server_id: Option<String>,
     /// Playback speed last used (UI may also keep its own copy).

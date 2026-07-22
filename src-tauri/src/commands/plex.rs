@@ -7,13 +7,13 @@ use crate::PlexAuthState;
 use tauri::State;
 
 #[tauri::command]
-pub fn plex_start_pin_auth(state: State<'_, PlexAuthState>) -> AppResult<PinAuthStart> {
-    plex::start_pin_auth(&state)
+pub async fn plex_start_pin_auth(state: State<'_, PlexAuthState>) -> AppResult<PinAuthStart> {
+    plex::start_pin_auth(&state).await
 }
 
 #[tauri::command]
-pub fn plex_poll_pin_auth(state: State<'_, PlexAuthState>) -> AppResult<PinAuthPoll> {
-    plex::poll_pin_auth(&state)
+pub async fn plex_poll_pin_auth(state: State<'_, PlexAuthState>) -> AppResult<PinAuthPoll> {
+    plex::poll_pin_auth(&state).await
 }
 
 #[tauri::command]
