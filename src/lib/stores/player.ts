@@ -4,6 +4,7 @@ import { progressApi } from "$lib/api/progress";
 import { plexApi } from "$lib/api/plex";
 import type {
   AudiobookSummary,
+  BookChapter,
   PlaybackTrack,
   SleepTimerState,
 } from "$lib/types/models";
@@ -23,6 +24,8 @@ interface PlayerState {
   serverId: string | null;
   tracks: PlaybackTrack[];
   trackIndex: number;
+  /** Chapter markers for the loaded book (empty if unsupported). */
+  chapters: BookChapter[];
   /** Book-level position (across tracks), seconds */
   positionSec: number;
   /** Book-level duration, seconds */
@@ -49,6 +52,7 @@ const initial: PlayerState = {
   serverId: null,
   tracks: [],
   trackIndex: 0,
+  chapters: [],
   positionSec: 0,
   durationSec: 0,
   playing: false,
@@ -455,6 +459,7 @@ function createPlayerStore() {
       serverId,
       tracks: [],
       trackIndex: 0,
+      chapters: [],
       positionSec: opts.startSec ?? 0,
       durationSec: book.durationMs ? book.durationMs / 1000 : 0,
       playing: false,
@@ -464,7 +469,11 @@ function createPlayerStore() {
     }));
 
     try {
-      const playback = await plexApi.getPlayback(serverId, book.ratingKey);
+      // Playback streams + chapter markers in parallel
+      const [playback, detail] = await Promise.all([
+        plexApi.getPlayback(serverId, book.ratingKey),
+        plexApi.getBookDetail(serverId, book.ratingKey).catch(() => null),
+      ]);
       if (gen !== loadGen) return;
 
       const tracks = playback.tracks ?? [];
@@ -477,10 +486,14 @@ function createPlayerStore() {
         return;
       }
 
-      const durationSec = totalDurationSec(tracks, playback.totalDurationMs);
+      const durationSec = totalDurationSec(
+        tracks,
+        playback.totalDurationMs ?? detail?.durationMs,
+      );
       update((s) => ({
         ...s,
         tracks,
+        chapters: detail?.chapters ?? [],
         durationSec: durationSec || s.durationSec,
       }));
 

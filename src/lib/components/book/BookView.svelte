@@ -3,6 +3,7 @@
   import { plexApi } from "$lib/api/plex";
   import { progressApi } from "$lib/api/progress";
   import { player, formatTime } from "$lib/stores/player";
+  import { resolveChapterWindow } from "$lib/chapterProgress";
   import RetryPanel from "$lib/components/ui/RetryPanel.svelte";
   import type { AudiobookSummary, BookChapter, BookDetail, ProgressSnapshot } from "$lib/types/models";
 
@@ -40,16 +41,11 @@
     durationMs > 0 ? Math.min(100, (livePositionMs / durationMs) * 100) : 0,
   );
 
-  const activeChapterIndex = $derived.by(() => {
-    const chs = detail?.chapters ?? [];
-    if (!chs.length) return -1;
-    let idx = 0;
-    for (let i = 0; i < chs.length; i++) {
-      if (chs[i].startMs <= livePositionMs) idx = i;
-      else break;
-    }
-    return idx;
-  });
+  const chapterWindow = $derived(
+    resolveChapterWindow(detail?.chapters ?? [], livePositionMs, durationMs || null),
+  );
+
+  const activeChapterIndex = $derived(chapterWindow?.index ?? -1);
 
   $effect(() => {
     // Reload when route params change
@@ -231,10 +227,10 @@
             {/if}
           </div>
 
-          <!-- Bookmark / progress -->
+          <!-- Bookmark / book progress -->
           <div class="rounded-2xl border border-white/10 bg-black/25 p-4 backdrop-blur-md">
             <div class="mb-2 flex items-center justify-between gap-2 text-xs">
-              <span class="font-medium text-ra-text">Your place</span>
+              <span class="font-medium text-ra-text">Book progress</span>
               <span class="tabular-nums text-ra-muted">
                 {#if livePositionMs > 0}
                   {formatTime(livePositionMs / 1000)}
@@ -258,6 +254,34 @@
               </p>
             {:else if isCurrent}
               <p class="mt-2 text-[11px] text-ra-muted/70">Live progress while listening</p>
+            {/if}
+
+            <!-- Chapter progress (when markers exist) -->
+            {#if chapterWindow}
+              <div class="mt-4 border-t border-white/10 pt-3">
+                <div class="mb-2 flex items-center justify-between gap-2 text-xs">
+                  <span class="min-w-0 truncate font-medium text-ra-text">
+                    <span class="text-ra-muted">Chapter</span>
+                    <span class="text-ra-muted/50"> · </span>
+                    <span class="text-ra-accent/90">{chapterWindow.title}</span>
+                  </span>
+                  <span class="shrink-0 tabular-nums text-ra-muted">
+                    {formatTime(chapterWindow.positionSec)}
+                    <span class="text-ra-muted/50">
+                      / {formatTime(chapterWindow.durationSec)}</span
+                    >
+                  </span>
+                </div>
+                <div class="h-1.5 overflow-hidden rounded-full bg-white/10">
+                  <div
+                    class="h-full rounded-full bg-gradient-to-r from-violet-400/90 to-ra-accent transition-[width] duration-300"
+                    style="width: {chapterWindow.progressPct}%"
+                  ></div>
+                </div>
+                <p class="mt-1.5 text-[11px] text-ra-muted/70">
+                  Ch {chapterWindow.index + 1} of {detail.chapters.length}
+                </p>
+              </div>
             {/if}
           </div>
 

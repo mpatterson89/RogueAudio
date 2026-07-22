@@ -1,26 +1,40 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
   import { player, formatTime, PLAYBACK_RATES } from "$lib/stores/player";
+  import { resolveChapterWindow } from "$lib/chapterProgress";
   import { bookHref } from "$lib/nav";
   import SleepTimer from "./SleepTimer.svelte";
-
-  function onSeek(e: Event) {
-    const v = Number((e.target as HTMLInputElement).value);
-    void player.seek(v);
-  }
-
-  const trackLabel = $derived.by(() => {
-    const n = $player.tracks.length;
-    if (n <= 1) return null;
-    return `Track ${$player.trackIndex + 1}/${n}`;
-  });
 
   /** Transport only when a stream is ready and not mid-load */
   const canControl = $derived($player.ready && !$player.loading);
   const showPause = $derived($player.playing && !$player.loading);
 
-  // Keep class list in script so Tailwind's CSS scanner doesn't choke on
-  // multi-line template expressions inside class="...".
+  const chapter = $derived(
+    resolveChapterWindow(
+      $player.chapters,
+      $player.positionSec * 1000,
+      $player.durationSec > 0 ? $player.durationSec * 1000 : null,
+    ),
+  );
+
+  /** Scrubber uses chapter window when markers exist, otherwise whole book. */
+  const scrubMax = $derived(
+    chapter ? Math.max(chapter.durationSec, 0.001) : Math.max($player.durationSec, 1),
+  );
+  const scrubValue = $derived(chapter ? chapter.positionSec : $player.positionSec);
+  const timeLeft = $derived(formatTime(chapter ? chapter.positionSec : $player.positionSec));
+  const timeRight = $derived(formatTime(chapter ? chapter.durationSec : $player.durationSec));
+
+  const trackLabel = $derived.by(() => {
+    if (chapter) {
+      const n = $player.chapters.length;
+      return `Ch ${chapter.index + 1}/${n}`;
+    }
+    const n = $player.tracks.length;
+    if (n <= 1) return null;
+    return `Track ${$player.trackIndex + 1}/${n}`;
+  });
+
   const nowPlayingClass = $derived(
     [
       "flex min-w-0 flex-1 items-center gap-3 rounded-xl text-left transition",
@@ -29,6 +43,16 @@
         : "cursor-default",
     ].join(" "),
   );
+
+  function onSeek(e: Event) {
+    const v = Number((e.target as HTMLInputElement).value);
+    if (chapter) {
+      // Map chapter-relative scrub → book timeline
+      void player.seek(chapter.startSec + v);
+    } else {
+      void player.seek(v);
+    }
+  }
 
   function openBookView() {
     if (!$player.book || !$player.serverId) return;
@@ -39,7 +63,6 @@
     if (!$player.book || !$player.serverId) return;
     await player.loadBook($player.serverId, $player.book, {
       autoplay: true,
-      // Keep bookmark so retry resumes where we left off when possible
       ignoreResume: false,
     });
   }
@@ -50,20 +73,27 @@
   aria-label="Player"
 >
   <div class="px-3 pt-2 sm:px-4">
+    {#if chapter}
+      <p class="mb-1 truncate text-[11px] text-ra-muted">
+        <span class="font-medium text-ra-text/80">Chapter</span>
+        <span class="text-ra-muted/50"> · </span>
+        <span class="text-ra-accent/90">{chapter.title}</span>
+      </p>
+    {/if}
     <input
       type="range"
       class="w-full"
       min="0"
-      max={Math.max($player.durationSec, 1)}
-      step="1"
-      value={$player.positionSec}
+      max={scrubMax}
+      step="0.25"
+      value={scrubValue}
       disabled={!canControl}
       oninput={onSeek}
-      aria-label="Seek"
+      aria-label={chapter ? "Seek within chapter" : "Seek"}
     />
     <div class="mt-0.5 flex justify-between text-[11px] tabular-nums text-ra-muted">
-      <span>{formatTime($player.positionSec)}</span>
-      <span>{formatTime($player.durationSec)}</span>
+      <span>{timeLeft}</span>
+      <span>{timeRight}</span>
     </div>
   </div>
 
@@ -213,7 +243,7 @@
 
   .play-icon {
     display: inline-block;
-    margin-left: 2px; /* optical center triangle */
+    margin-left: 2px;
   }
 
   .pause-icon {
