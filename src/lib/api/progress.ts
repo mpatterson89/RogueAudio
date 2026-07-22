@@ -6,4 +6,5 @@ export const progressApi = {
     invoke<ProgressSnapshot | null>("progress_get", { ratingKey }),
   report: (report: ProgressReport) =>
     invoke<ProgressSnapshot>("progress_report", { report }),
+  clear: (ratingKey: string) => invoke<void>("progress_clear", { ratingKey }),
 };

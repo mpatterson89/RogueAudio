@@ -40,6 +40,7 @@ pub fn progress_report(report: ProgressReport) -> AppResult<ProgressSnapshot> {
         duration_ms: report.duration_ms,
         updated_at: chrono::Utc::now().to_rfc3339(),
         source: ProgressSource::Local,
+        track_index: report.track_index,
     };
 
     let path = progress_file(&report.rating_key)?;
@@ -52,4 +53,14 @@ pub fn progress_report(report: ProgressReport) -> AppResult<ProgressSnapshot> {
     let _speed = report.speed;
 
     Ok(snap)
+}
+
+/// Delete saved progress for a title (optional reset).
+#[tauri::command]
+pub fn progress_clear(rating_key: String) -> AppResult<()> {
+    let path = progress_file(&rating_key)?;
+    if path.exists() {
+        fs::remove_file(path)?;
+    }
+    Ok(())
 }

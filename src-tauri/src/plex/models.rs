@@ -153,6 +153,9 @@ pub struct ProgressSnapshot {
     pub duration_ms: Option<u64>,
     pub updated_at: String,
     pub source: ProgressSource,
+    /// Optional track index within multi-file books (best-effort).
+    #[serde(default)]
+    pub track_index: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,4 +175,6 @@ pub struct ProgressReport {
     pub time_ms: u64,
     pub duration_ms: Option<u64>,
     pub speed: f64,
+    #[serde(default)]
+    pub track_index: Option<u32>,
 }

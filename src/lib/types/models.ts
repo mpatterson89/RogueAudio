@@ -99,6 +99,7 @@ export interface ProgressSnapshot {
   durationMs?: number | null;
   updatedAt: string;
   source: "local" | "plex" | "merged";
+  trackIndex?: number | null;
 }
 
 export interface ProgressReport {
@@ -107,6 +108,7 @@ export interface ProgressReport {
   timeMs: number;
   durationMs?: number | null;
   speed: number;
+  trackIndex?: number | null;
 }
 
 export type SleepMode = "off" | "duration" | "end_of_chapter";

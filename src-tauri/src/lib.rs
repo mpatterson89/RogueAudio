@@ -27,6 +27,7 @@ pub fn run() {
             // Progress
             progress_get,
             progress_report,
+            progress_clear,
             // Downloads (stub)
             download_list,
             download_enqueue,

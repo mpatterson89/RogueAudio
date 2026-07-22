@@ -93,23 +93,31 @@
   async function playOrResume() {
     if (!detail) return;
     const book = asSummary(detail);
-    if (isCurrent && $player.ready) {
+    if (isCurrent && $player.ready && !$player.loading) {
       await player.toggle();
+      // Refresh bookmark card after pause/resume
+      if (!$player.playing) {
+        progress = await progressApi.get(ratingKey).catch(() => progress);
+      }
       return;
     }
-    await player.loadBook(serverId, book, true);
+    // Resume from saved bookmark when opening play
+    await player.loadBook(serverId, book, { autoplay: true });
   }
 
   async function seekChapter(ch: BookChapter) {
     if (!detail) return;
     const book = asSummary(detail);
-    if (!isCurrent || !$player.ready) {
-      await player.loadBook(serverId, book, false);
-    }
-    await player.seek(ch.startMs / 1000);
-    if (!$player.playing) {
-      await player.toggle();
-    }
+    // Jump to chapter start and play — ignores old bookmark so selection wins
+    await player.playAt(serverId, book, ch.startMs / 1000, true);
+    // Keep local UI progress in sync after the jump
+    progress = {
+      ratingKey: detail.ratingKey,
+      positionMs: ch.startMs,
+      durationMs: detail.durationMs ?? null,
+      updatedAt: new Date().toISOString(),
+      source: "local",
+    };
   }
 
   function chapterDurationLabel(ch: BookChapter, next?: BookChapter): string | null {

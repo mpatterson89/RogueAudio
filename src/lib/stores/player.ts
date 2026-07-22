@@ -10,6 +10,14 @@ import type {
 
 export const PLAYBACK_RATES = [0.8, 0.9, 1, 1.1, 1.2, 1.25, 1.5, 1.75, 2] as const;
 
+export interface LoadBookOptions {
+  /** Start at this book-level position (seconds). Overrides saved resume. */
+  startSec?: number;
+  /** When true, ignore local bookmark and use startSec / 0. */
+  ignoreResume?: boolean;
+  autoplay?: boolean;
+}
+
 interface PlayerState {
   book: AudiobookSummary | null;
   serverId: string | null;
@@ -65,6 +73,49 @@ function totalDurationSec(tracks: PlaybackTrack[], totalMs?: number | null): num
   return sum > 0 ? sum / 1000 : 0;
 }
 
+/** Map book-level seconds → track index + offset within that track. */
+function mapBookPosition(
+  tracks: PlaybackTrack[],
+  bookSec: number,
+): { trackIndex: number; seekInTrack: number } {
+  const offsets = trackOffsets(tracks);
+  const clamped = Math.max(0, bookSec);
+  for (let i = 0; i < tracks.length; i++) {
+    const start = offsets[i] ?? 0;
+    const len = (tracks[i].durationMs ?? 0) / 1000;
+    const end =
+      i === tracks.length - 1
+        ? Number.POSITIVE_INFINITY
+        : start + Math.max(len, 0.001);
+    if (clamped >= start && clamped < end) {
+      return { trackIndex: i, seekInTrack: Math.max(0, clamped - start) };
+    }
+  }
+  const last = Math.max(0, tracks.length - 1);
+  return { trackIndex: last, seekInTrack: 0 };
+}
+
+/**
+ * Progressive Plex transcoder streams don't seek reliably via currentTime.
+ * Bake the start offset into the stream URL instead (ms).
+ */
+function streamUrlAt(url: string, offsetSec: number): string {
+  try {
+    const u = new URL(url);
+    const ms = Math.max(0, Math.floor(offsetSec * 1000));
+    if (ms > 250) {
+      u.searchParams.set("offset", String(ms));
+    } else {
+      u.searchParams.delete("offset");
+    }
+    // Fresh session avoids sticky transcoder state when jumping chapters
+    u.searchParams.set("session", crypto.randomUUID());
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
 function createPlayerStore() {
   const store = writable<PlayerState>(initial);
   const { subscribe, update } = store;
@@ -74,26 +125,41 @@ function createPlayerStore() {
   let progressInterval: ReturnType<typeof setInterval> | null = null;
   let lastProgressFlush = 0;
   let loadGen = 0;
+  /** Offset baked into the currently loaded stream URL (seconds into track). */
+  let streamBaseOffsetSec = 0;
+
+  // Persist when tab/window is hidden
+  if (typeof window !== "undefined") {
+    window.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") {
+        const s = get(store);
+        if (s.book && s.ready) {
+          void flushProgress(s.playing ? "playing" : "paused");
+        }
+      }
+    });
+    window.addEventListener("pagehide", () => {
+      const s = get(store);
+      if (s.book && s.ready) {
+        void flushProgress(s.playing ? "playing" : "paused");
+      }
+    });
+  }
 
   engine.on((event) => {
     const s = get(store);
-    // Ignore engine noise while a new source is loading
     if (s.loading || !s.ready || s.tracks.length === 0) return;
 
     const offsets = trackOffsets(s.tracks);
 
     if (event === "timeupdate" || event === "durationchange" || event === "loadedmetadata") {
-      const trackPos = engine.getPosition();
-      const trackDur = engine.getDuration();
-      let bookPos = (offsets[s.trackIndex] ?? 0) + trackPos;
-      let bookDur = s.durationSec;
-      if (trackDur > 0 && !(s.tracks[s.trackIndex]?.durationMs)) {
-        bookDur = Math.max(bookDur, bookPos + (trackDur - trackPos));
-      }
+      // Stream may already start mid-track via transcoder offset
+      const trackPos = streamBaseOffsetSec + engine.getPosition();
+      const bookPos = (offsets[s.trackIndex] ?? 0) + trackPos;
       update((st) => ({
         ...st,
         positionSec: bookPos,
-        durationSec: bookDur || st.durationSec,
+        durationSec: st.durationSec,
       }));
     }
 
@@ -101,7 +167,6 @@ function createPlayerStore() {
       update((st) => ({ ...st, playing: true }));
     }
     if (event === "paused") {
-      // Don't clear playing if we intentionally ignore brief pauses during seek
       update((st) => ({ ...st, playing: false }));
     }
 
@@ -117,23 +182,27 @@ function createPlayerStore() {
         loading: false,
       }));
       stopProgressLoop();
+      void flushProgress("paused");
     }
   });
 
   async function flushProgress(state: "playing" | "paused" | "stopped") {
     const s = get(store);
     if (!s.book) return;
+    // Don't wipe bookmarks with a 0 write while still loading
+    if (s.loading && s.positionSec <= 0) return;
     try {
       await progressApi.report({
         ratingKey: s.book.ratingKey,
         state,
-        timeMs: Math.floor(s.positionSec * 1000),
+        timeMs: Math.floor(Math.max(0, s.positionSec) * 1000),
         durationMs: s.durationSec ? Math.floor(s.durationSec * 1000) : null,
         speed: s.rate,
+        trackIndex: s.tracks.length ? s.trackIndex : null,
       });
       lastProgressFlush = Date.now();
     } catch {
-      /* local write is best-effort */
+      /* best-effort */
     }
   }
 
@@ -142,7 +211,8 @@ function createPlayerStore() {
     progressInterval = setInterval(() => {
       const s = get(store);
       if (!s.playing || !s.book) return;
-      if (Date.now() - lastProgressFlush > 10_000) {
+      // Save more often so restarts land near the true position
+      if (Date.now() - lastProgressFlush > 5_000) {
         void flushProgress("playing");
       }
     }, 2000);
@@ -181,7 +251,7 @@ function createPlayerStore() {
     }, 500);
   }
 
-  async function loadTrackAt(index: number, seekSec = 0, autoplay = false) {
+  async function loadTrackAt(index: number, seekInTrackSec = 0, autoplay = false) {
     const s = get(store);
     const track = s.tracks[index];
     if (!track) return;
@@ -195,21 +265,28 @@ function createPlayerStore() {
       error: null,
     }));
 
+    streamBaseOffsetSec = Math.max(0, seekInTrackSec);
+    const url = streamUrlAt(track.url, streamBaseOffsetSec);
+
     try {
-      await engine.load(track.url);
+      await engine.load(url);
       engine.setRate(s.rate);
-      if (seekSec > 0) engine.seek(seekSec);
+      // Position is already baked into the stream; keep element at 0
+      engine.seek(0);
 
       const offsets = trackOffsets(s.tracks);
+      const bookPos = (offsets[index] ?? 0) + streamBaseOffsetSec;
       update((st) => ({
         ...st,
         loading: false,
         ready: true,
-        positionSec: (offsets[index] ?? 0) + Math.max(0, seekSec),
+        positionSec: bookPos,
       }));
 
+      // Persist immediately so a crash mid-listen keeps the chapter jump
+      void flushProgress(autoplay ? "playing" : "paused");
+
       if (autoplay) {
-        // Optimistic UI — don't wait only on media events (can be flaky in webview)
         update((st) => ({ ...st, playing: true }));
         await engine.play();
         startProgressLoop();
@@ -232,100 +309,130 @@ function createPlayerStore() {
       await loadTrackAt(s.trackIndex + 1, 0, true);
       return;
     }
-    // Finished book
     update((st) => ({ ...st, playing: false }));
     stopProgressLoop();
     void flushProgress("stopped");
   }
 
-  return {
-    subscribe,
+  async function ensurePlayback(
+    serverId: string,
+    book: AudiobookSummary,
+    opts: LoadBookOptions = {},
+  ) {
+    const autoplay = opts.autoplay ?? true;
+    const gen = ++loadGen;
+    engine.pause();
+    stopProgressLoop();
 
-    async loadBook(serverId: string, book: AudiobookSummary, autoplay = true) {
-      const gen = ++loadGen;
-      engine.pause();
-      stopProgressLoop();
+    update((s) => ({
+      ...s,
+      book,
+      serverId,
+      tracks: [],
+      trackIndex: 0,
+      positionSec: opts.startSec ?? 0,
+      durationSec: book.durationMs ? book.durationMs / 1000 : 0,
+      playing: false,
+      ready: false,
+      loading: true,
+      error: null,
+    }));
 
-      update((s) => ({
-        ...s,
-        book,
-        serverId,
-        tracks: [],
-        trackIndex: 0,
-        positionSec: 0,
-        durationSec: book.durationMs ? book.durationMs / 1000 : 0,
-        playing: false,
-        ready: false,
-        loading: true,
-        error: null,
-      }));
+    try {
+      const playback = await plexApi.getPlayback(serverId, book.ratingKey);
+      if (gen !== loadGen) return;
 
-      try {
-        const playback = await plexApi.getPlayback(serverId, book.ratingKey);
-        if (gen !== loadGen) return;
-
-        const tracks = playback.tracks ?? [];
-        if (tracks.length === 0) {
-          update((s) => ({
-            ...s,
-            loading: false,
-            error: "No playable audio found for this title",
-          }));
-          return;
-        }
-
-        const durationSec = totalDurationSec(tracks, playback.totalDurationMs);
+      const tracks = playback.tracks ?? [];
+      if (tracks.length === 0) {
         update((s) => ({
           ...s,
-          tracks,
-          durationSec: durationSec || s.durationSec,
+          loading: false,
+          error: "No playable audio found for this title",
         }));
+        return;
+      }
 
-        // Resume from local progress when possible
-        let resumeSec = 0;
+      const durationSec = totalDurationSec(tracks, playback.totalDurationMs);
+      update((s) => ({
+        ...s,
+        tracks,
+        durationSec: durationSec || s.durationSec,
+      }));
+
+      let targetSec = opts.startSec ?? 0;
+      if (!opts.ignoreResume && opts.startSec === undefined) {
         try {
           const progress = await progressApi.get(book.ratingKey);
-          if (progress && progress.positionMs > 15_000) {
-            resumeSec = progress.positionMs / 1000;
+          if (progress && progress.positionMs > 5_000) {
+            targetSec = progress.positionMs / 1000;
           }
         } catch {
           /* ignore */
         }
-
-        if (gen !== loadGen) return;
-
-        // Map book position → track + offset
-        const offsets = trackOffsets(tracks);
-        let trackIndex = 0;
-        let seekInTrack = 0;
-        if (resumeSec > 0 && durationSec > 0) {
-          for (let i = 0; i < tracks.length; i++) {
-            const start = offsets[i] ?? 0;
-            const len = (tracks[i].durationMs ?? 0) / 1000;
-            const end = len > 0 ? start + len : start + 1e12;
-            if (resumeSec < end || i === tracks.length - 1) {
-              trackIndex = i;
-              seekInTrack = Math.max(0, resumeSec - start);
-              break;
-            }
-          }
-        }
-
-        await loadTrackAt(trackIndex, seekInTrack, autoplay);
-      } catch (e) {
-        if (gen !== loadGen) return;
-        update((s) => ({
-          ...s,
-          loading: false,
-          ready: false,
-          error: e instanceof Error ? e.message : String(e),
-        }));
       }
+
+      if (gen !== loadGen) return;
+
+      const { trackIndex, seekInTrack } = mapBookPosition(tracks, targetSec);
+      await loadTrackAt(trackIndex, seekInTrack, autoplay);
+    } catch (e) {
+      if (gen !== loadGen) return;
+      update((s) => ({
+        ...s,
+        loading: false,
+        ready: false,
+        error: e instanceof Error ? e.message : String(e),
+      }));
+    }
+  }
+
+  return {
+    subscribe,
+
+    /** Load a book; optionally resume from bookmark (default) or a specific position. */
+    async loadBook(
+      serverId: string,
+      book: AudiobookSummary,
+      autoplayOrOpts: boolean | LoadBookOptions = true,
+    ) {
+      const opts: LoadBookOptions =
+        typeof autoplayOrOpts === "boolean"
+          ? { autoplay: autoplayOrOpts }
+          : autoplayOrOpts;
+      await ensurePlayback(serverId, book, opts);
+    },
+
+    /**
+     * Jump to a book-level position and play (used by chapter list).
+     * Always ignores the saved bookmark so the chapter choice wins.
+     */
+    async playAt(
+      serverId: string,
+      book: AudiobookSummary,
+      positionSec: number,
+      autoplay = true,
+    ) {
+      const s = get(store);
+      const sameBook =
+        s.book?.ratingKey === book.ratingKey &&
+        s.serverId === serverId &&
+        s.ready &&
+        s.tracks.length > 0;
+
+      if (sameBook) {
+        await this.seek(positionSec, autoplay);
+        return;
+      }
+
+      await ensurePlayback(serverId, book, {
+        startSec: positionSec,
+        ignoreResume: true,
+        autoplay,
+      });
     },
 
     async toggle() {
       const s = get(store);
-      // Ignore while loading or not ready — avoids race errors on early clicks
       if (!s.book || !s.ready || s.loading) return;
 
       if (!s.playing || engine.isPaused()) {
@@ -350,34 +457,28 @@ function createPlayerStore() {
       }
     },
 
-    async seek(bookSeconds: number) {
+    /**
+     * Seek to a book-level time. Reloads the transcoder stream at that offset
+     * so jumps (including chapter taps) actually land correctly.
+     */
+    async seek(bookSeconds: number, autoplay?: boolean) {
       const s = get(store);
-      if (!s.ready || s.tracks.length === 0) return;
+      if (!s.ready || s.tracks.length === 0 || s.loading) return;
 
       const clamped = Math.max(0, Math.min(bookSeconds, s.durationSec || bookSeconds));
-      const offsets = trackOffsets(s.tracks);
+      const { trackIndex, seekInTrack } = mapBookPosition(s.tracks, clamped);
+      const shouldPlay = autoplay ?? (s.playing || !engine.isPaused());
 
-      let trackIndex = s.trackIndex;
-      let seekInTrack = clamped;
+      // Always reload with transcoder offset — HTML5 seek on progressive MP3 is unreliable
+      await loadTrackAt(trackIndex, seekInTrack, shouldPlay);
+      void flushProgress(shouldPlay ? "playing" : "paused");
+    },
 
-      for (let i = 0; i < s.tracks.length; i++) {
-        const start = offsets[i] ?? 0;
-        const len = (s.tracks[i].durationMs ?? 0) / 1000;
-        const end = i === s.tracks.length - 1 ? Number.POSITIVE_INFINITY : start + Math.max(len, 0.001);
-        if (clamped >= start && clamped < end) {
-          trackIndex = i;
-          seekInTrack = clamped - start;
-          break;
-        }
-      }
-
-      if (trackIndex !== s.trackIndex) {
-        await loadTrackAt(trackIndex, seekInTrack, s.playing || !engine.isPaused());
-      } else {
-        engine.seek(seekInTrack);
-        update((st) => ({ ...st, positionSec: clamped }));
-      }
-      void flushProgress(s.playing ? "playing" : "paused");
+    /** Force-save current position (e.g. leaving book view). */
+    async saveProgress() {
+      const s = get(store);
+      if (!s.book) return;
+      await flushProgress(s.playing ? "playing" : "paused");
     },
 
     setRate(rate: number) {
