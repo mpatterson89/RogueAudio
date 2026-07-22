@@ -263,7 +263,7 @@
           <div class="flex flex-wrap gap-3 pt-1">
             <button type="button" class="btn-primary" onclick={playOrResume}>
               {#if isCurrent && $player.loading}
-                <span class="spinner-sm" aria-hidden="true"></span>
+                <span class="ra-spinner ra-spinner-on-accent" aria-hidden="true"></span>
                 Loading…
               {:else if isCurrent && $player.playing}
                 Pause
@@ -469,24 +469,6 @@
     color: var(--color-ra-text);
   }
 
-  .spinner-lg {
-    width: 2rem;
-    height: 2rem;
-    border: 3px solid rgba(124, 106, 247, 0.25);
-    border-top-color: var(--color-ra-accent);
-    border-radius: 999px;
-    animation: ra-spin 0.75s linear infinite;
-  }
-
-  .spinner-sm {
-    width: 1rem;
-    height: 1rem;
-    border: 2px solid rgba(255, 255, 255, 0.35);
-    border-top-color: #fff;
-    border-radius: 999px;
-    animation: ra-spin 0.7s linear infinite;
-  }
-
   .eq {
     display: flex;
     align-items: flex-end;
@@ -513,11 +495,6 @@
     animation-delay: 0.3s;
   }
 
-  @keyframes ra-spin {
-    to {
-      transform: rotate(360deg);
-    }
-  }
   @keyframes ra-eq {
     0%,
     100% {
