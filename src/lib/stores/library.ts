@@ -1,10 +1,12 @@
-import { writable } from "svelte/store";
+import { writable, get } from "svelte/store";
 import { plexApi } from "$lib/api/plex";
+import { filterMusicLibraries, pickDefaultLibrary } from "$lib/plex/libraries";
 import type { AudiobookSummary, PlexLibrary, PlexServer } from "$lib/types/models";
 
 interface LibraryState {
   servers: PlexServer[];
   serverId: string | null;
+  /** Music-type libraries only (audiobook sources). */
   libraries: PlexLibrary[];
   libraryKey: string | null;
   books: AudiobookSummary[];
@@ -25,7 +27,8 @@ const initial: LibraryState = {
 };
 
 function createLibraryStore() {
-  const { subscribe, update } = writable<LibraryState>(initial);
+  const store = writable<LibraryState>(initial);
+  const { subscribe, update } = store;
 
   return {
     subscribe,
@@ -47,10 +50,10 @@ function createLibraryStore() {
     async loadLibraries(serverId: string) {
       update((s) => ({ ...s, loading: true, error: null, serverId }));
       try {
-        const libraries = await plexApi.listLibraries(serverId);
-        // Prefer a library titled like audiobooks
-        const preferred =
-          libraries.find((l) => /audio|book/i.test(l.title)) ?? libraries[0] ?? null;
+        const raw = await plexApi.listLibraries(serverId);
+        // Music-type only; multiple music libs → UI filter (select).
+        const libraries = filterMusicLibraries(raw);
+        const preferred = pickDefaultLibrary(libraries);
         update((s) => ({
           ...s,
           libraries,
@@ -88,24 +91,14 @@ function createLibraryStore() {
     },
     async search(query: string) {
       update((s) => ({ ...s, query }));
-      let serverId: string | null = null;
-      let libraryKey: string | null = null;
-      const unsub = subscribe((s) => {
-        serverId = s.serverId;
-        libraryKey = s.libraryKey;
-      });
-      unsub();
-      if (serverId && libraryKey) {
-        await this.loadBooks(serverId, libraryKey, query);
+      const s = get(store);
+      if (s.serverId && s.libraryKey) {
+        await this.loadBooks(s.serverId, s.libraryKey, query);
       }
     },
     selectLibrary(libraryKey: string) {
-      let serverId: string | null = null;
-      const unsub = subscribe((s) => {
-        serverId = s.serverId;
-      });
-      unsub();
-      if (serverId) void this.loadBooks(serverId, libraryKey);
+      const s = get(store);
+      if (s.serverId) void this.loadBooks(s.serverId, libraryKey);
     },
     reset() {
       update(() => ({ ...initial }));

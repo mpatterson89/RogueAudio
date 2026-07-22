@@ -58,20 +58,29 @@
     <header class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
       <div>
         <h1 class="text-2xl font-semibold tracking-tight">Library</h1>
-        <p class="text-sm text-ra-muted">
-          {$library.servers.find((s) => s.id === $library.serverId)?.name ?? "Plex"}
-          {#if $library.libraries.length}
-            ·
-            <select
-              class="ml-1 rounded-md border border-ra-border bg-ra-surface px-2 py-1 text-sm text-ra-text"
-              value={$library.libraryKey ?? ""}
-              onchange={(e) =>
-                library.selectLibrary((e.target as HTMLSelectElement).value)}
-            >
-              {#each $library.libraries as lib}
-                <option value={lib.key}>{lib.title}</option>
-              {/each}
-            </select>
+        <p class="flex flex-wrap items-center gap-x-1 gap-y-1 text-sm text-ra-muted">
+          <span
+            >{$library.servers.find((s) => s.id === $library.serverId)?.name ??
+              "Plex"}</span
+          >
+          {#if $library.libraries.length > 1}
+            <span aria-hidden="true">·</span>
+            <label class="inline-flex items-center gap-1.5">
+              <span class="text-xs uppercase tracking-wide text-ra-muted/80">Library</span>
+              <select
+                class="min-h-9 rounded-md border border-ra-border bg-ra-surface px-2 py-1 text-sm text-ra-text"
+                value={$library.libraryKey ?? ""}
+                onchange={(e) =>
+                  library.selectLibrary((e.target as HTMLSelectElement).value)}
+              >
+                {#each $library.libraries as lib}
+                  <option value={lib.key}>{lib.title}</option>
+                {/each}
+              </select>
+            </label>
+          {:else if $library.libraries.length === 1}
+            <span aria-hidden="true">·</span>
+            <span>{$library.libraries[0].title}</span>
           {/if}
         </p>
       </div>

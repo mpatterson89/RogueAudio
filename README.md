@@ -83,6 +83,17 @@ npm run tauri:build
 3. Tap a book → player bar loads; play/pause, ±30s, speed, sleep timer
 4. Progress is written under `~/.local/share/rogue-audio/progress/`
 
+## Plex identity
+
+- **Product:** RogueAudio  
+- **Client identifier:** `app.rogueaudio`  
+
+Libraries: only Plex **Music** sections are shown. If you have more than one (e.g. Audiobooks + Music), use the Library filter in the header.
+
+## Cross-platform
+
+Primary target today is **Linux / Steam Deck**. The stack (Tauri 2) supports Windows later with little UI change; OS-specific pieces (MPRIS, Flatpak, paths) stay behind thin backends. See `docs/ARCHITECTURE.md`.
+
 ## License
 
 MIT

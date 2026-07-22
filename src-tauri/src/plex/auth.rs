@@ -1,3 +1,4 @@
+use super::identity::{PLEX_CLIENT_IDENTIFIER, PLEX_PRODUCT};
 use super::models::{AuthStatus, PinAuthPoll, PinAuthStart};
 use crate::error::{AppError, AppResult};
 use crate::storage::config::AppConfig;
@@ -50,11 +51,30 @@ pub fn start_pin_auth(state: &PlexAuthState) -> AppResult<PinAuthStart> {
         poll_count: 0,
     });
 
+    // Real flow will also send X-Plex-Product / X-Plex-Client-Identifier headers.
+    // URL context keeps the same identity visible on plex.tv authorize page.
+    let auth_url = format!(
+        "https://app.plex.tv/auth#?clientID={client_id}&code={code}&context%5Bdevice%5D%5Bproduct%5D={product}",
+        client_id = urlencoding_minimal(PLEX_CLIENT_IDENTIFIER),
+        code = urlencoding_minimal(&code),
+        product = urlencoding_minimal(PLEX_PRODUCT),
+    );
+
     Ok(PinAuthStart {
         id,
         code: code.clone(),
-        auth_url: format!("https://app.plex.tv/auth#?pinCode={code}&context[device][product]=RogueAudio"),
+        auth_url,
     })
+}
+
+/// Minimal URL encoding without pulling in a crate yet.
+fn urlencoding_minimal(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
+            _ => format!("%{:02X}", c as u8),
+        })
+        .collect()
 }
 
 /// Poll PIN. Real flow: GET https://plex.tv/api/v2/pins/{id}

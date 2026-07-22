@@ -199,10 +199,41 @@ Owned by the **player store** (frontend) for MVP:
 - Library-first home; auth is a gate, not the home forever
 - Minimal chrome; cover art and transport dominate
 
+## Plex client identity
+
+| Header / field | Value |
+|----------------|--------|
+| Product | `RogueAudio` |
+| Client identifier | `app.rogueaudio` |
+| App / Flatpak id | `app.rogueaudio` |
+
+Defined in `src-tauri/src/plex/identity.rs` — keep these stable so Plex authorized-device lists stay consistent across updates and platforms.
+
+## Library filtering
+
+- Audiobooks in Plex are **Music** sections (`type=artist`).
+- `plex_list_libraries` returns **only** music-type libraries.
+- If more than one music library exists (e.g. “Audiobooks” + “Music”), the UI shows a **Library** filter and defaults to titles matching audio/book/spoken.
+
+## Cross-platform notes (Linux now, Windows later)
+
+Tauri already targets Linux / Windows / macOS from one codebase. When adding Windows:
+
+| Area | Notes |
+|------|--------|
+| Paths | Use `dirs` crate (already) — not hard-coded `~/.local/share` |
+| MPRIS | Linux-only; gate with `#[cfg(target_os = "linux")]`; Windows uses SMTC later |
+| Flatpak | Linux packaging only; Windows uses MSI/NSIS via Tauri bundler |
+| Webview | WebKitGTK (Linux) vs WebView2 (Windows) — HTML5 audio should work on both; test codecs (m4b/m4a) |
+| Media keys | Abstract behind a `system_media` module so OS backends swap cleanly |
+| Plex identity | Same `app.rogueaudio` client id on all OS builds |
+
+No major frontend refactor expected for Windows; backend system integrations stay behind cfg / trait boundaries.
+
 ## Packaging
 
 1. Develop with `npm run tauri dev`
-2. Release: Tauri bundle → Flatpak (primary for Deck)
+2. Release: Tauri bundle → Flatpak (primary for Deck); Windows later via Tauri
 3. Identifier: `app.rogueaudio`
 
 ## Implementation phases

@@ -67,6 +67,10 @@ pub fn plex_list_servers() -> AppResult<Vec<PlexServer>> {
     }])
 }
 
+/// List libraries usable as audiobook sources.
+///
+/// Plex models audiobooks as **Music** sections (`type=artist`). We only return
+/// music-type libraries. When more than one exists, the frontend shows a filter.
 #[tauri::command]
 pub fn plex_list_libraries(_server_id: String) -> AppResult<Vec<PlexLibrary>> {
     let status = plex::auth_status()?;
@@ -74,7 +78,8 @@ pub fn plex_list_libraries(_server_id: String) -> AppResult<Vec<PlexLibrary>> {
         return Err(crate::error::AppError::NotAuthenticated);
     }
 
-    Ok(vec![
+    // Stub: real PMS `/library/sections` will replace this list.
+    let all = vec![
         PlexLibrary {
             key: "1".into(),
             title: "Audiobooks".into(),
@@ -87,7 +92,26 @@ pub fn plex_list_libraries(_server_id: String) -> AppResult<Vec<PlexLibrary>> {
             library_type: "artist".into(),
             agent: None,
         },
-    ])
+        // Non-music section — filtered out (movies/tv are not book sources).
+        PlexLibrary {
+            key: "3".into(),
+            title: "Movies".into(),
+            library_type: "movie".into(),
+            agent: None,
+        },
+    ];
+
+    Ok(filter_music_libraries(all))
+}
+
+/// Keep only music-type sections; sort audiobook-titled libraries first.
+pub fn filter_music_libraries(libraries: Vec<PlexLibrary>) -> Vec<PlexLibrary> {
+    let mut music: Vec<PlexLibrary> = libraries
+        .into_iter()
+        .filter(|l| l.is_music_section())
+        .collect();
+    music.sort_by_key(|l| (!l.looks_like_audiobooks(), l.title.to_ascii_lowercase()));
+    music
 }
 
 #[tauri::command]

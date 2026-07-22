@@ -48,9 +48,25 @@ pub struct PlexConnection {
 pub struct PlexLibrary {
     pub key: String,
     pub title: String,
-    /// Plex type string, e.g. "artist" for music/audiobook libraries.
+    /// Plex section type. Music / audiobook libraries use `"artist"`.
     pub library_type: String,
     pub agent: Option<String>,
+}
+
+impl PlexLibrary {
+    /// Plex stores audiobook libraries as Music sections (`type=artist`).
+    pub fn is_music_section(&self) -> bool {
+        matches!(
+            self.library_type.to_ascii_lowercase().as_str(),
+            "artist" | "music"
+        )
+    }
+
+    /// Prefer sections whose title looks like an audiobook library.
+    pub fn looks_like_audiobooks(&self) -> bool {
+        let t = self.title.to_ascii_lowercase();
+        t.contains("audio") || t.contains("book") || t.contains("spoken")
+    }
 }
 
 /// An audiobook-like item (often a music album / artist folder in Plex).
