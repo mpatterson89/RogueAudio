@@ -101,18 +101,20 @@
   <button
     type="button"
     class={$player.sleep.mode !== "off"
-      ? "flex min-h-10 min-w-10 items-center gap-1.5 rounded-lg border border-ra-accent bg-ra-surface-2 px-2.5 text-sm text-ra-accent"
-      : "flex min-h-10 min-w-10 items-center gap-1.5 rounded-lg border border-ra-border bg-ra-surface-2 px-2.5 text-sm text-ra-text"}
+      ? "inline-flex min-h-10 min-w-10 items-center justify-center gap-1.5 rounded-lg border border-ra-accent bg-ra-surface-2 px-2.5 text-sm leading-none text-ra-accent"
+      : "inline-flex min-h-10 min-w-10 items-center justify-center gap-1.5 rounded-lg border border-ra-border bg-ra-surface-2 px-2.5 text-sm leading-none text-ra-text"}
     onclick={openMenu}
     aria-expanded={open}
     aria-haspopup="true"
     title="Sleep timer"
   >
-    <span aria-hidden="true">☾</span>
+    <span class="inline-flex h-4 w-4 items-center justify-center text-base leading-none" aria-hidden="true"
+      >☾</span
+    >
     {#if remainingLabel}
-      <span class="tabular-nums text-xs">{remainingLabel}</span>
+      <span class="tabular-nums text-xs leading-none">{remainingLabel}</span>
     {:else if $player.sleep.mode === "end_of_chapter"}
-      <span class="text-xs">Ch</span>
+      <span class="text-xs leading-none">Ch</span>
     {/if}
   </button>
 

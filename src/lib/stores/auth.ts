@@ -1,5 +1,6 @@
 import { writable, derived } from "svelte/store";
 import { plexApi } from "$lib/api/plex";
+import { library } from "$lib/stores/library";
 import type { AuthStatus, PinAuthStart } from "$lib/types/models";
 
 interface AuthState {
@@ -97,6 +98,7 @@ function createAuthStore() {
       stopPolling();
       try {
         await plexApi.logout();
+        library.reset();
         set({ ...initial });
       } catch (e) {
         update((s) => ({

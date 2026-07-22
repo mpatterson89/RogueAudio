@@ -46,7 +46,7 @@
       <li>Real Plex PIN auth & library fetch</li>
       <li>Progress sync to Plex timeline</li>
       <li>Chapter support & end-of-chapter sleep</li>
-      <li>Offline downloads</li>
+      <li>Offline downloads (book view → Download)</li>
       <li>MPRIS media keys</li>
       <li>Flatpak packaging for Steam Deck</li>
     </ul>

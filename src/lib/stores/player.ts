@@ -1,7 +1,9 @@
 import { writable, get } from "svelte/store";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { getAudioEngine } from "$lib/audio/engine";
 import { progressApi } from "$lib/api/progress";
 import { plexApi } from "$lib/api/plex";
+import { downloadsApi } from "$lib/api/downloads";
 import type {
   AudiobookSummary,
   BookChapter,
@@ -129,6 +131,16 @@ function withQuery(url: string, patch: Record<string, string | null>): string {
   return `${base}?${out}`;
 }
 
+/** Local offline files (asset protocol / absolute paths converted for webview). */
+function isLocalStream(url: string): boolean {
+  return (
+    url.startsWith("asset:") ||
+    url.includes("asset.localhost") ||
+    url.startsWith("file:") ||
+    url.startsWith("/") // absolute path before convertFileSrc (shouldn't reach engine)
+  );
+}
+
 /**
  * Progressive transcoder streams often won't HTML5-seek. Prefer baking
  * start offset into the URL.
@@ -136,13 +148,34 @@ function withQuery(url: string, patch: Record<string, string | null>): string {
  * IMPORTANT: Plex universal transcoder `offset` is in **seconds**, not ms.
  * Sending chapter startTimeOffset (ms) as offset seeks past EOF → empty
  * stream → WebKit media error 4.
+ *
+ * Local offline MP3s skip query patching — seek via HTML5 instead.
  */
 function streamUrlAt(url: string, offsetSec: number): string {
+  if (isLocalStream(url)) return url;
   const sec = Math.max(0, Math.floor(offsetSec));
   return withQuery(url, {
     session: crypto.randomUUID(),
     offset: sec >= 1 ? String(sec) : null,
   });
+}
+
+function toPlayableUrl(pathOrUrl: string): string {
+  if (
+    pathOrUrl.startsWith("http://") ||
+    pathOrUrl.startsWith("https://") ||
+    pathOrUrl.startsWith("asset:") ||
+    pathOrUrl.startsWith("file:") ||
+    pathOrUrl.includes("asset.localhost")
+  ) {
+    return pathOrUrl;
+  }
+  // Absolute filesystem path from download_local_playback
+  try {
+    return convertFileSrc(pathOrUrl);
+  } catch {
+    return pathOrUrl;
+  }
 }
 
 function createPlayerStore() {
@@ -378,10 +411,11 @@ function createPlayerStore() {
     const offsets = trackOffsets(s.tracks);
 
     try {
+      const local = isLocalStream(track.url);
       // Strategy A: transcoder offset (best for long jumps on progressive MP3)
-      // Strategy B: load from start + HTML5 seek (fallback)
+      // Strategy B: load from start + HTML5 seek (local files always use B)
       let usedOffset = 0;
-      if (wantOffset > 0.25) {
+      if (wantOffset > 0.25 && !local) {
         try {
           usedOffset = wantOffset;
           streamBaseOffsetSec = usedOffset;
@@ -397,6 +431,9 @@ function createPlayerStore() {
       } else {
         streamBaseOffsetSec = 0;
         await engine.load(streamUrlAt(track.url, 0));
+        if (wantOffset > 0.25) {
+          await engine.seekAndWait(wantOffset, 10_000);
+        }
       }
 
       engine.setRate(s.rate);
@@ -469,14 +506,33 @@ function createPlayerStore() {
     }));
 
     try {
-      // Playback streams + chapter markers in parallel
-      const [playback, detail] = await Promise.all([
-        plexApi.getPlayback(serverId, book.ratingKey),
-        plexApi.getBookDetail(serverId, book.ratingKey).catch(() => null),
-      ]);
+      // Prefer complete offline download; fall back to live Plex streams.
+      let tracks: PlaybackTrack[] = [];
+      let totalDurationMs: number | null | undefined;
+      let chapters: BookChapter[] = [];
+
+      const local = await downloadsApi.localPlayback(book.ratingKey).catch(() => null);
+
+      if (local?.playback?.tracks?.length) {
+        tracks = local.playback.tracks.map((t) => ({
+          ...t,
+          url: toPlayableUrl(t.url),
+        }));
+        totalDurationMs = local.playback.totalDurationMs;
+        chapters = local.chapters ?? [];
+      } else {
+        const [playback, detail] = await Promise.all([
+          plexApi.getPlayback(serverId, book.ratingKey),
+          plexApi.getBookDetail(serverId, book.ratingKey).catch(() => null),
+        ]);
+        if (gen !== loadGen) return;
+        tracks = playback.tracks ?? [];
+        totalDurationMs = playback.totalDurationMs ?? detail?.durationMs;
+        chapters = detail?.chapters ?? [];
+      }
+
       if (gen !== loadGen) return;
 
-      const tracks = playback.tracks ?? [];
       if (tracks.length === 0) {
         update((s) => ({
           ...s,
@@ -486,14 +542,11 @@ function createPlayerStore() {
         return;
       }
 
-      const durationSec = totalDurationSec(
-        tracks,
-        playback.totalDurationMs ?? detail?.durationMs,
-      );
+      const durationSec = totalDurationSec(tracks, totalDurationMs);
       update((s) => ({
         ...s,
         tracks,
-        chapters: detail?.chapters ?? [],
+        chapters,
         durationSec: durationSec || s.durationSec,
       }));
 

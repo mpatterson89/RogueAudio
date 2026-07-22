@@ -3,6 +3,13 @@
   import { plexApi } from "$lib/api/plex";
   import { progressApi } from "$lib/api/progress";
   import { player, formatTime } from "$lib/stores/player";
+  import {
+    downloads,
+    downloadsByKey,
+    isDownloadActive,
+    isDownloadComplete,
+    formatBytes,
+  } from "$lib/stores/downloads";
   import { resolveChapterWindow } from "$lib/chapterProgress";
   import RetryPanel from "$lib/components/ui/RetryPanel.svelte";
   import SleepTimer from "$lib/components/player/SleepTimer.svelte";
@@ -22,6 +29,18 @@
   let error = $state<string | null>(null);
   let summaryExpanded = $state(false);
   let loadGen = 0;
+  let downloadBusy = $state(false);
+  let downloadError = $state<string | null>(null);
+
+  const downloadItem = $derived($downloadsByKey.get(ratingKey) ?? null);
+  const downloadPending = $derived(!!$downloads.pending[ratingKey]);
+  const downloading = $derived(
+    downloadPending || isDownloadActive(downloadItem),
+  );
+  const downloaded = $derived(isDownloadComplete(downloadItem));
+  const downloadPct = $derived(
+    Math.round(Math.min(100, Math.max(0, (downloadItem?.progress ?? 0) * 100))),
+  );
 
   const isCurrent = $derived(
     $player.book?.ratingKey === ratingKey && $player.serverId === serverId,
@@ -59,6 +78,7 @@
     const gen = ++loadGen;
     loading = true;
     error = null;
+    downloadError = null;
     try {
       const [d, p] = await Promise.all([
         plexApi.getBookDetail(serverId, ratingKey),
@@ -68,11 +88,49 @@
       detail = d;
       progress = p;
       summaryExpanded = false;
+      void downloads.refresh();
     } catch (e) {
       if (gen !== loadGen) return;
       error = e instanceof Error ? e.message : String(e);
     } finally {
       if (gen === loadGen) loading = false;
+    }
+  }
+
+  async function startDownload() {
+    downloadBusy = true;
+    downloadError = null;
+    try {
+      await downloads.enqueue(serverId, ratingKey);
+    } catch (e) {
+      downloadError = e instanceof Error ? e.message : String(e);
+    } finally {
+      downloadBusy = false;
+    }
+  }
+
+  async function cancelDownload() {
+    downloadBusy = true;
+    downloadError = null;
+    try {
+      await downloads.cancel(ratingKey);
+    } catch (e) {
+      downloadError = e instanceof Error ? e.message : String(e);
+    } finally {
+      downloadBusy = false;
+    }
+  }
+
+  async function removeDownload() {
+    if (!confirm("Remove the offline copy of this audiobook?")) return;
+    downloadBusy = true;
+    downloadError = null;
+    try {
+      await downloads.remove(ratingKey);
+    } catch (e) {
+      downloadError = e instanceof Error ? e.message : String(e);
+    } finally {
+      downloadBusy = false;
     }
   }
 
@@ -307,12 +365,100 @@
                 +30s
               </button>
             {/if}
+
+            <!-- Offline download -->
+            {#if downloaded}
+              <button
+                type="button"
+                class="btn-secondary"
+                disabled={downloadBusy}
+                onclick={removeDownload}
+                title="Remove offline copy"
+              >
+                ✓ Downloaded
+              </button>
+            {:else if downloading}
+              <button
+                type="button"
+                class="btn-secondary min-w-[9.5rem]"
+                disabled={downloadBusy}
+                onclick={cancelDownload}
+                title="Cancel download"
+              >
+                <span class="ra-spinner" aria-hidden="true"></span>
+                {downloadPct}% · Cancel
+              </button>
+            {:else}
+              <button
+                type="button"
+                class="btn-secondary"
+                disabled={downloadBusy}
+                onclick={startDownload}
+                title="Download for offline listening"
+              >
+                {#if downloadBusy}
+                  <span class="ra-spinner" aria-hidden="true"></span>
+                {:else}
+                  <span aria-hidden="true">⬇</span>
+                {/if}
+                Download
+              </button>
+            {/if}
+
             <!-- Same SleepTimer component + player.sleep store as the bottom bar -->
             <div class="flex items-center gap-2">
               <span class="hidden text-xs text-ra-muted sm:inline">Sleep</span>
               <SleepTimer />
             </div>
           </div>
+
+          {#if downloading && downloadItem}
+            <div class="space-y-1.5">
+              <div class="h-1.5 overflow-hidden rounded-full bg-white/10">
+                <div
+                  class="h-full rounded-full bg-gradient-to-r from-ra-accent to-violet-400 transition-[width] duration-300"
+                  style="width: {downloadPct}%"
+                ></div>
+              </div>
+              <p class="text-[11px] text-ra-muted/80">
+                {#if (downloadItem.trackCount ?? 0) > 1}
+                  Whole book · part {Math.min(downloadItem.tracksDone + 1, downloadItem.trackCount)}
+                  of {downloadItem.trackCount}
+                {:else}
+                  Whole book
+                {/if}
+                {#if downloadItem.bytesDownloaded > 0}
+                  · {formatBytes(downloadItem.bytesDownloaded)}{#if downloadItem.bytesTotal}
+                    {" "}/ ~{formatBytes(downloadItem.bytesTotal)}{/if}
+                {/if}
+                · {downloadPct}%
+              </p>
+            </div>
+          {:else if downloaded && downloadItem}
+            <p class="text-[11px] text-ra-muted/80">
+              Offline · whole book
+              {#if downloadItem.trackCount > 1}
+                · {downloadItem.trackCount} parts
+              {/if}
+              {#if downloadItem.bytesDownloaded > 0}
+                · {formatBytes(downloadItem.bytesDownloaded)}
+              {/if}
+              {#if downloadItem.downloadedAt}
+                · {new Date(downloadItem.downloadedAt).toLocaleString()}
+              {/if}
+            </p>
+          {:else if downloadItem?.status === "error" || downloadError}
+            <p class="text-[11px] text-ra-danger">
+              {downloadError ?? downloadItem?.error ?? "Download failed"}
+              <button
+                type="button"
+                class="ml-2 font-medium text-ra-accent underline-offset-2 hover:underline"
+                onclick={startDownload}
+              >
+                Retry
+              </button>
+            </p>
+          {/if}
         </div>
       </section>
 
@@ -473,7 +619,11 @@
   }
 
   .btn-secondary {
+    display: inline-flex;
     min-height: 48px;
+    align-items: center;
+    justify-content: center;
+    gap: 0.45rem;
     border-radius: 999px;
     border: 1px solid rgba(255, 255, 255, 0.12);
     background: rgba(0, 0, 0, 0.25);
@@ -484,6 +634,9 @@
   }
   .btn-secondary:hover {
     border-color: var(--color-ra-accent);
+  }
+  .btn-secondary:disabled {
+    opacity: 0.65;
   }
 
   .btn-ghost {

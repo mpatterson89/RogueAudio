@@ -14,25 +14,38 @@
   onMount(async () => {
     await auth.refresh();
     if ($isAuthenticated) {
-      await library.loadServers();
+      // Use cache when available — avoids re-hitting Plex on every visit.
+      await library.ensureLoaded();
     }
   });
 
   $effect(() => {
-    if ($isAuthenticated && $library.servers.length === 0 && !$library.loading && !$library.error) {
-      void library.loadServers();
+    if (
+      $isAuthenticated &&
+      $library.servers.length === 0 &&
+      $library.allBooks.length === 0 &&
+      !$library.loading &&
+      !$library.error
+    ) {
+      void library.ensureLoaded();
     }
   });
 
   async function selectBook(book: (typeof $library.books)[0]) {
     const serverId = $library.serverId;
     if (!serverId) return;
-    await player.loadBook(serverId, book, true);
+    // Load into the player (resume position) but don't start audio until Play/Resume.
+    await player.loadBook(serverId, book, { autoplay: false });
     await goto(bookHref(serverId, book.ratingKey));
   }
 
   async function retryLibrary() {
     await library.retry();
+  }
+
+  async function refreshLibrary() {
+    search = "";
+    await library.refresh();
   }
 </script>
 
@@ -62,7 +75,23 @@
   <div class="space-y-5 pb-4">
     <header class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
       <div class="space-y-1">
-        <h1 class="text-2xl font-semibold tracking-tight">Library</h1>
+        <div class="flex flex-wrap items-center gap-2">
+          <h1 class="text-2xl font-semibold tracking-tight">Library</h1>
+          <button
+            type="button"
+            class="inline-flex min-h-9 min-w-9 items-center justify-center rounded-lg border border-ra-border bg-ra-surface px-2.5 text-sm text-ra-muted transition hover:border-ra-accent hover:text-ra-text disabled:opacity-50"
+            onclick={refreshLibrary}
+            disabled={$library.loading}
+            title="Refresh library from Plex"
+            aria-label="Refresh library from Plex"
+          >
+            {#if $library.loading && $library.allBooks.length > 0}
+              <span class="ra-spinner" aria-hidden="true"></span>
+            {:else}
+              <span aria-hidden="true">↻</span>
+            {/if}
+          </button>
+        </div>
         <div class="flex flex-wrap items-center gap-x-2 gap-y-2 text-sm text-ra-muted">
           {#if $library.servers.length > 1}
             <label class="inline-flex items-center gap-1.5">
@@ -111,7 +140,11 @@
 
           {#if !$library.loading && $library.books.length > 0}
             <span aria-hidden="true">·</span>
-            <span class="text-xs">{$library.books.length} titles</span>
+            <span class="text-xs"
+              >{$library.books.length}{$library.query
+                ? ` of ${$library.allBooks.length}`
+                : ""} titles</span
+            >
           {/if}
         </div>
       </div>
@@ -129,7 +162,7 @@
         loading={$library.loading}
         onretry={retryLibrary}
       />
-    {:else if $library.loading && $library.books.length === 0}
+    {:else if $library.loading && $library.allBooks.length === 0}
       <div class="flex min-h-48 flex-col items-center justify-center gap-3 py-12">
         <span class="ra-spinner ra-spinner-lg" aria-hidden="true"></span>
         <p class="text-sm text-ra-muted">Loading library from your Plex server…</p>
@@ -148,9 +181,25 @@
         <button
           type="button"
           class="mt-4 inline-flex min-h-11 items-center gap-2 rounded-xl border border-ra-border px-4 text-sm text-ra-muted hover:border-ra-accent hover:text-ra-text"
-          onclick={retryLibrary}
+          onclick={refreshLibrary}
         >
           Refresh
+        </button>
+      </div>
+    {:else if $library.books.length === 0 && $library.query}
+      <div
+        class="flex min-h-48 flex-col items-center justify-center rounded-2xl border border-dashed border-ra-border bg-ra-surface/50 p-8 text-center"
+      >
+        <p class="text-sm text-ra-muted">No titles match “{$library.query}”.</p>
+        <button
+          type="button"
+          class="mt-4 inline-flex min-h-11 items-center gap-2 rounded-xl border border-ra-border px-4 text-sm text-ra-muted hover:border-ra-accent hover:text-ra-text"
+          onclick={() => {
+            search = "";
+            library.search("");
+          }}
+        >
+          Clear search
         </button>
       </div>
     {:else}
