@@ -196,9 +196,17 @@ function createPlayerStore() {
           update((s) => ({ ...s, positionSec: sec }));
         }
       } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        // Library browse can work before stream resolution is implemented.
+        const playbackPending =
+          /not implemented|stream playback/i.test(msg) ||
+          msg.includes("stream playback against PMS");
         update((s) => ({
           ...s,
-          error: e instanceof Error ? e.message : String(e),
+          demoMode: false,
+          error: playbackPending
+            ? "Playback coming next — library browse & search work now."
+            : msg,
         }));
       }
     },

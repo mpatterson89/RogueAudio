@@ -17,7 +17,6 @@
   });
 
   $effect(() => {
-    // When auth flips true after stub login, load library
     if ($isAuthenticated && $library.servers.length === 0 && !$library.loading) {
       void library.loadServers();
     }
@@ -26,8 +25,8 @@
   async function selectBook(book: (typeof $library.books)[0]) {
     const serverId = $library.serverId;
     if (!serverId) return;
+    // Load into player bar (playback streams land next).
     await player.loadBook(serverId, book);
-    await player.toggle();
   }
 </script>
 
@@ -56,13 +55,32 @@
 {:else}
   <div class="space-y-5 pb-4">
     <header class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-      <div>
+      <div class="space-y-1">
         <h1 class="text-2xl font-semibold tracking-tight">Library</h1>
-        <p class="flex flex-wrap items-center gap-x-1 gap-y-1 text-sm text-ra-muted">
-          <span
-            >{$library.servers.find((s) => s.id === $library.serverId)?.name ??
-              "Plex"}</span
-          >
+        <div class="flex flex-wrap items-center gap-x-2 gap-y-2 text-sm text-ra-muted">
+          {#if $library.servers.length > 1}
+            <label class="inline-flex items-center gap-1.5">
+              <span class="text-xs uppercase tracking-wide text-ra-muted/80">Server</span>
+              <select
+                class="min-h-9 rounded-md border border-ra-border bg-ra-surface px-2 py-1 text-sm text-ra-text"
+                value={$library.serverId ?? ""}
+                onchange={(e) => {
+                  search = "";
+                  library.selectServer((e.target as HTMLSelectElement).value);
+                }}
+              >
+                {#each $library.servers as s}
+                  <option value={s.id}>{s.name}</option>
+                {/each}
+              </select>
+            </label>
+          {:else}
+            <span
+              >{$library.servers.find((s) => s.id === $library.serverId)?.name ??
+                "Plex"}</span
+            >
+          {/if}
+
           {#if $library.libraries.length > 1}
             <span aria-hidden="true">·</span>
             <label class="inline-flex items-center gap-1.5">
@@ -70,8 +88,10 @@
               <select
                 class="min-h-9 rounded-md border border-ra-border bg-ra-surface px-2 py-1 text-sm text-ra-text"
                 value={$library.libraryKey ?? ""}
-                onchange={(e) =>
-                  library.selectLibrary((e.target as HTMLSelectElement).value)}
+                onchange={(e) => {
+                  search = "";
+                  library.selectLibrary((e.target as HTMLSelectElement).value);
+                }}
               >
                 {#each $library.libraries as lib}
                   <option value={lib.key}>{lib.title}</option>
@@ -82,20 +102,40 @@
             <span aria-hidden="true">·</span>
             <span>{$library.libraries[0].title}</span>
           {/if}
-        </p>
+
+          {#if !$library.loading && $library.books.length > 0}
+            <span aria-hidden="true">·</span>
+            <span class="text-xs">{$library.books.length} titles</span>
+          {/if}
+        </div>
       </div>
       <SearchBar
         bind:value={search}
+        placeholder="Search titles or authors…"
         onsearch={(q) => library.search(q)}
       />
     </header>
 
     {#if $library.error}
-      <p class="text-sm text-ra-danger">{$library.error}</p>
+      <div class="rounded-xl border border-ra-danger/40 bg-ra-danger/10 px-4 py-3 text-sm text-ra-danger">
+        {$library.error}
+      </div>
     {/if}
 
     {#if $library.loading && $library.books.length === 0}
-      <p class="text-sm text-ra-muted">Loading library…</p>
+      <p class="text-sm text-ra-muted">Loading library from your Plex server…</p>
+    {:else if !$library.loading && $library.libraries.length === 0 && !$library.error}
+      <div
+        class="flex min-h-48 flex-col items-center justify-center rounded-2xl border border-dashed border-ra-border bg-ra-surface/50 p-8 text-center"
+      >
+        <p class="text-sm text-ra-muted">
+          No music / audiobook libraries found on this server.
+        </p>
+        <p class="mt-2 max-w-md text-xs text-ra-muted/80">
+          In Plex, audiobooks need to live in a Music-type library (often named
+          “Audiobooks”).
+        </p>
+      </div>
     {:else}
       <BookGrid
         books={$library.books}

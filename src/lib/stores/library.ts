@@ -100,6 +100,9 @@ function createLibraryStore() {
       const s = get(store);
       if (s.serverId) void this.loadBooks(s.serverId, libraryKey);
     },
+    selectServer(serverId: string) {
+      void this.loadLibraries(serverId);
+    },
     reset() {
       update(() => ({ ...initial }));
     },

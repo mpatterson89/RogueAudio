@@ -26,6 +26,7 @@ export interface PlexServer {
   product?: string | null;
   provides?: string | null;
   publicAddress?: string | null;
+  owned?: boolean;
   connections: PlexConnection[];
 }
 

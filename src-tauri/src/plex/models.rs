@@ -32,6 +32,8 @@ pub struct PlexServer {
     pub product: Option<String>,
     pub provides: Option<String>,
     pub public_address: Option<String>,
+    #[serde(default)]
+    pub owned: bool,
     pub connections: Vec<PlexConnection>,
 }
 
