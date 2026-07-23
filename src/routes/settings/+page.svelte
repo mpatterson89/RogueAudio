@@ -236,9 +236,17 @@
   </section>
 
   <section class="rounded-2xl border border-ra-border bg-ra-surface p-5 text-sm text-ra-muted">
+    <h2 class="mb-2 font-medium text-ra-text">Continue elsewhere</h2>
+    <p>
+      On each book’s page, turn on <span class="text-ra-text">Continue elsewhere</span> to
+      sync your listen position with Plex and Plexamp (and pull their position when
+      different). Off by default per title; local bookmarks always work.
+    </p>
+  </section>
+
+  <section class="rounded-2xl border border-ra-border bg-ra-surface p-5 text-sm text-ra-muted">
     <h2 class="mb-2 font-medium text-ra-text">Roadmap</h2>
     <ul class="list-inside list-disc space-y-1">
-      <li>Progress sync to Plex timeline</li>
       <li>MPRIS media keys</li>
       <li>Flatpak packaging for Steam Deck</li>
     </ul>

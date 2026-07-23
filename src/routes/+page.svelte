@@ -4,19 +4,50 @@
   import { auth, isAuthenticated } from "$lib/stores/auth";
   import { library } from "$lib/stores/library";
   import { player } from "$lib/stores/player";
+  import { settings } from "$lib/stores/settings";
   import { navBusy } from "$lib/stores/navBusy";
+  import { userCollections } from "$lib/stores/userCollections";
   import SearchBar from "$lib/components/library/SearchBar.svelte";
   import BookGrid from "$lib/components/library/BookGrid.svelte";
+  import AuthorGrid from "$lib/components/library/AuthorGrid.svelte";
+  import ViewToggle from "$lib/components/library/ViewToggle.svelte";
+  import SortSelect from "$lib/components/ui/SortSelect.svelte";
+  import AddToCollectionModal from "$lib/components/collections/AddToCollectionModal.svelte";
   import RetryPanel from "$lib/components/ui/RetryPanel.svelte";
   import { bookHref } from "$lib/nav";
+  import { authorHref, groupByAuthor } from "$lib/authors";
+  import {
+    AUTHOR_SORT_OPTIONS,
+    BOOK_SORT_OPTIONS,
+    sortAuthors,
+    sortBooks,
+    type AuthorSort,
+    type BookSort,
+  } from "$lib/sort";
+  import type { AudiobookSummary, AuthorSummary, LibraryViewMode } from "$lib/types/models";
 
   let search = $state("");
   let openingKey = $state<string | null>(null);
+  let modalBook = $state<AudiobookSummary | null>(null);
+  let modalOpen = $state(false);
+
+  const viewMode = $derived($settings.libraryViewMode);
+  const sortedBooks = $derived(sortBooks($library.books, $settings.bookSort));
+  const authors = $derived(
+    sortAuthors(groupByAuthor($library.books), $settings.authorSort),
+  );
+
+  /** Keep input and store query in sync — store can outlive this page. */
+  function clearFilter() {
+    search = "";
+    library.search("");
+  }
 
   onMount(async () => {
+    // Returning here remounts with empty input but leftover $library.query
+    clearFilter();
     await auth.refresh();
     if ($isAuthenticated) {
-      // Use cache when available — avoids re-hitting Plex on every visit.
       await library.ensureLoaded();
     }
   });
@@ -33,13 +64,18 @@
     }
   });
 
-  async function selectBook(book: (typeof $library.books)[0]) {
+  $effect(() => {
+    const sid = $library.serverId;
+    const lk = $library.libraryKey;
+    if (sid && lk) void userCollections.ensure(sid, lk);
+  });
+
+  async function selectBook(book: AudiobookSummary) {
     const serverId = $library.serverId;
     if (!serverId) return;
     openingKey = book.ratingKey;
     navBusy.start("Opening book…");
     try {
-      // Navigate first so the book page paints immediately; load player in background.
       await goto(bookHref(serverId, book.ratingKey));
       void player.loadBook(serverId, book, { autoplay: false });
     } finally {
@@ -48,12 +84,31 @@
     }
   }
 
+  async function selectAuthor(author: AuthorSummary) {
+    navBusy.start("Opening author…");
+    try {
+      await goto(authorHref(author.key));
+    } finally {
+      navBusy.stop();
+    }
+  }
+
+  function openAddToCollection(book: AudiobookSummary) {
+    modalBook = book;
+    modalOpen = true;
+  }
+
+  function setView(mode: LibraryViewMode) {
+    clearFilter();
+    settings.patch({ libraryViewMode: mode });
+  }
+
   async function retryLibrary() {
     await library.retry();
   }
 
   async function refreshLibrary() {
-    search = "";
+    clearFilter();
     await library.refresh();
   }
 </script>
@@ -83,9 +138,25 @@
 {:else}
   <div class="space-y-5 pb-4">
     <header class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-      <div class="space-y-1">
+      <div class="space-y-2">
         <div class="flex flex-wrap items-center gap-2">
           <h1 class="text-2xl font-semibold tracking-tight">Library</h1>
+          <ViewToggle value={viewMode} onchange={setView} />
+          {#if viewMode === "authors"}
+            <SortSelect
+              value={$settings.authorSort}
+              options={AUTHOR_SORT_OPTIONS}
+              label="Sort"
+              onchange={(v) => settings.patch({ authorSort: v as AuthorSort })}
+            />
+          {:else}
+            <SortSelect
+              value={$settings.bookSort}
+              options={BOOK_SORT_OPTIONS}
+              label="Sort"
+              onchange={(v) => settings.patch({ bookSort: v as BookSort })}
+            />
+          {/if}
           <button
             type="button"
             class="inline-flex min-h-9 min-w-9 items-center justify-center rounded-lg border border-ra-border bg-ra-surface px-2.5 text-sm text-ra-muted transition hover:border-ra-accent hover:text-ra-text disabled:opacity-50"
@@ -109,7 +180,7 @@
                 class="min-h-9 rounded-md border border-ra-border bg-ra-surface px-2 py-1 text-sm text-ra-text"
                 value={$library.serverId ?? ""}
                 onchange={(e) => {
-                  search = "";
+                  clearFilter();
                   library.selectServer((e.target as HTMLSelectElement).value);
                 }}
               >
@@ -133,7 +204,7 @@
                 class="min-h-9 rounded-md border border-ra-border bg-ra-surface px-2 py-1 text-sm text-ra-text"
                 value={$library.libraryKey ?? ""}
                 onchange={(e) => {
-                  search = "";
+                  clearFilter();
                   library.selectLibrary((e.target as HTMLSelectElement).value);
                 }}
               >
@@ -149,17 +220,23 @@
 
           {#if !$library.loading && $library.books.length > 0}
             <span aria-hidden="true">·</span>
-            <span class="text-xs"
-              >{$library.books.length}{$library.query
-                ? ` of ${$library.allBooks.length}`
-                : ""} titles</span
-            >
+            <span class="text-xs">
+              {#if viewMode === "authors"}
+                {authors.length} authors
+              {:else}
+                {$library.books.length}{$library.query
+                  ? ` of ${$library.allBooks.length}`
+                  : ""} titles
+              {/if}
+            </span>
           {/if}
         </div>
       </div>
       <SearchBar
         bind:value={search}
-        placeholder="Search titles or authors…"
+        placeholder={viewMode === "authors"
+          ? "Filter by author or title…"
+          : "Search titles or authors…"}
         onsearch={(q) => library.search(q)}
       />
     </header>
@@ -183,10 +260,6 @@
         <p class="text-sm text-ra-muted">
           No music / audiobook libraries found on this server.
         </p>
-        <p class="mt-2 max-w-md text-xs text-ra-muted/80">
-          In Plex, audiobooks need to live in a Music-type library (often named
-          “Audiobooks”).
-        </p>
         <button
           type="button"
           class="mt-4 inline-flex min-h-11 items-center gap-2 rounded-xl border border-ra-border px-4 text-sm text-ra-muted hover:border-ra-accent hover:text-ra-text"
@@ -203,20 +276,29 @@
         <button
           type="button"
           class="mt-4 inline-flex min-h-11 items-center gap-2 rounded-xl border border-ra-border px-4 text-sm text-ra-muted hover:border-ra-accent hover:text-ra-text"
-          onclick={() => {
-            search = "";
-            library.search("");
-          }}
+          onclick={clearFilter}
         >
           Clear search
         </button>
       </div>
+    {:else if viewMode === "authors"}
+      <AuthorGrid authors={authors} onselect={selectAuthor} />
     {:else}
       <BookGrid
-        books={$library.books}
+        books={sortedBooks}
         selectedKey={openingKey ?? $player.book?.ratingKey}
         onselect={selectBook}
+        onaddToCollection={openAddToCollection}
       />
     {/if}
   </div>
+
+  <AddToCollectionModal
+    book={modalBook}
+    open={modalOpen}
+    onclose={() => {
+      modalOpen = false;
+      modalBook = null;
+    }}
+  />
 {/if}

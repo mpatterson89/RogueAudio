@@ -6,6 +6,7 @@
 
   const links = [
     { href: "/", label: "Library", icon: "📚" },
+    { href: "/collections", label: "Collections", icon: "🗂️" },
     { href: "/auth", label: "Plex", icon: "🔗" },
     { href: "/settings", label: "Settings", icon: "⚙️" },
   ];
@@ -30,7 +31,11 @@
 
   <nav class="flex flex-1 flex-col gap-1 p-2">
     {#each links as link}
-      {@const active = $page.url.pathname === link.href}
+      {@const active =
+        link.href === "/"
+          ? $page.url.pathname === "/"
+          : $page.url.pathname === link.href ||
+            $page.url.pathname.startsWith(link.href + "/")}
       <a
         href={link.href}
         class={active

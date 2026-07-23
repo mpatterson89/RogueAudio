@@ -36,6 +36,9 @@
   let loadGen = 0;
   let downloadBusy = $state(false);
   let downloadError = $state<string | null>(null);
+  let continueElsewhere = $state(false);
+  let syncBusy = $state(false);
+  let syncMessage = $state<string | null>(null);
 
   const downloadItem = $derived($downloadsByKey.get(ratingKey) ?? null);
   const downloadPending = $derived(!!$downloads.pending[ratingKey]);
@@ -49,6 +52,9 @@
 
   const isCurrent = $derived(
     $player.book?.ratingKey === ratingKey && $player.serverId === serverId,
+  );
+  const syncOn = $derived(
+    isCurrent ? $player.progressSyncEnabled : continueElsewhere,
   );
 
   const livePositionMs = $derived(
@@ -99,9 +105,18 @@
     }
 
     try {
+      const syncEnabled = await progressApi
+        .syncGetEnabled(ratingKey)
+        .catch(() => false);
+      if (gen !== loadGen) return;
+      continueElsewhere = syncEnabled;
+      syncMessage = null;
+
       const [d, p] = await Promise.all([
         getBookDetail(serverId, ratingKey, { force }),
-        progressApi.get(ratingKey).catch(() => null),
+        syncEnabled
+          ? progressApi.getMerged(serverId, ratingKey).catch(() => null)
+          : progressApi.get(ratingKey).catch(() => null),
       ]);
       if (gen !== loadGen) return;
       detail = d;
@@ -126,6 +141,48 @@
 
   async function refreshDetail() {
     await load({ force: true });
+  }
+
+  async function toggleContinueElsewhere() {
+    syncBusy = true;
+    syncMessage = null;
+    try {
+      const next = !syncOn;
+      if (isCurrent) {
+        const result = await player.setProgressSyncEnabled(next);
+        continueElsewhere = result.enabled;
+        syncMessage = result.message;
+        if (result.positionMs > 0) {
+          progress = {
+            ratingKey,
+            positionMs: result.positionMs,
+            durationMs: durationMs || null,
+            updatedAt: new Date().toISOString(),
+            source: (result.source as ProgressSnapshot["source"]) || "merged",
+          };
+        }
+      } else if (next) {
+        const merged = await progressApi.syncEnableAndMerge(serverId, ratingKey);
+        continueElsewhere = true;
+        progress = merged;
+        if (merged.source === "plex" || merged.source === "merged") {
+          syncMessage =
+            merged.positionMs > 5_000
+              ? "Resumed from Plex — press Play to continue"
+              : "Syncing with Plex & Plexamp";
+        } else {
+          syncMessage = "Syncing with Plex & Plexamp";
+        }
+      } else {
+        await progressApi.syncSetEnabled(ratingKey, false);
+        continueElsewhere = false;
+        syncMessage = "Stopped syncing with Plex";
+      }
+    } catch (e) {
+      syncMessage = e instanceof Error ? e.message : String(e);
+    } finally {
+      syncBusy = false;
+    }
   }
 
   async function startDownload() {
@@ -380,9 +437,52 @@
             {#if progress?.updatedAt && !isCurrent}
               <p class="mt-2 text-[11px] text-ra-muted/70">
                 Saved bookmark · {new Date(progress.updatedAt).toLocaleString()}
+                {#if progress.source === "plex" || progress.source === "merged"}
+                  · from Plex
+                {/if}
               </p>
             {:else if isCurrent}
               <p class="mt-2 text-[11px] text-ra-muted/70">Live progress while listening</p>
+            {/if}
+
+            <!-- Continue elsewhere: sync position with Plex / Plexamp -->
+            <div
+              class="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-white/10 pt-3"
+            >
+              <div class="min-w-0">
+                <p class="text-xs font-medium text-ra-text">Continue elsewhere</p>
+                <p class="text-[11px] text-ra-muted/80">
+                  Sync position with Plex &amp; Plexamp
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={syncOn}
+                disabled={syncBusy}
+                class={syncOn
+                  ? "sync-toggle relative w-9 shrink-0 rounded-full bg-ra-accent p-0 transition disabled:opacity-60"
+                  : "sync-toggle relative w-9 shrink-0 rounded-full bg-white/15 p-0 transition disabled:opacity-60"}
+                onclick={toggleContinueElsewhere}
+                title={syncOn
+                  ? "Turn off Plex position sync"
+                  : "Sync position with Plex and Plexamp"}
+              >
+                <span
+                  class={syncOn
+                    ? "sync-toggle-knob absolute left-[1.125rem] top-0.5 rounded-full bg-white shadow transition"
+                    : "sync-toggle-knob absolute left-0.5 top-0.5 rounded-full bg-white/90 shadow transition"}
+                  aria-hidden="true"
+                ></span>
+              </button>
+            </div>
+            {#if syncBusy}
+              <p class="mt-1.5 flex items-center gap-2 text-[11px] text-ra-muted">
+                <span class="ra-spinner" aria-hidden="true"></span>
+                Checking Plex…
+              </p>
+            {:else if syncMessage}
+              <p class="mt-1.5 text-[11px] text-ra-accent/90">{syncMessage}</p>
             {/if}
 
             <!-- Chapter progress (when markers exist) -->
@@ -721,6 +821,17 @@
   .btn-ghost:hover {
     border-color: rgba(255, 255, 255, 0.1);
     color: var(--color-ra-text);
+  }
+
+  /* Override global button min-height: 44px so the switch isn't a tall oval */
+  .sync-toggle {
+    height: 1.25rem; /* 20px */
+    min-height: 0 !important;
+    width: 2.25rem; /* 36px */
+  }
+  .sync-toggle-knob {
+    height: 1rem;
+    width: 1rem;
   }
 
   .eq {

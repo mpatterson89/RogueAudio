@@ -7,6 +7,7 @@
   let customError = $state<string | null>(null);
   let applyingCustom = $state(false);
   let applyingChapter = $state(false);
+  let applyingNextChapter = $state(false);
 
   const PRESETS = [15, 30, 45, 60, 90] as const;
   const MIN_MINUTES = 1;
@@ -86,6 +87,21 @@
     }
   }
 
+  async function applyEndOfNextChapter() {
+    applyingNextChapter = true;
+    try {
+      await player.setSleepEndOfNextChapter();
+      open = false;
+    } finally {
+      applyingNextChapter = false;
+    }
+  }
+
+  const chapterSleepActive = $derived(
+    $player.sleep.mode === "end_of_chapter" ||
+      $player.sleep.mode === "end_of_next_chapter",
+  );
+
   function openMenu() {
     open = !open;
     if (open) {
@@ -115,6 +131,8 @@
       <span class="tabular-nums text-xs leading-none">{remainingLabel}</span>
     {:else if $player.sleep.mode === "end_of_chapter"}
       <span class="text-xs leading-none">Ch</span>
+    {:else if $player.sleep.mode === "end_of_next_chapter"}
+      <span class="text-xs leading-none">NCh</span>
     {/if}
   </button>
 
@@ -195,7 +213,7 @@
         type="button"
         role="menuitem"
         class="flex min-h-10 w-full items-center gap-2 rounded-lg px-2 text-left text-sm hover:bg-ra-surface-2 disabled:opacity-60"
-        disabled={applyingChapter || !$player.book}
+        disabled={applyingChapter || applyingNextChapter || !$player.book}
         onclick={applyEndOfChapter}
       >
         {#if applyingChapter}
@@ -205,9 +223,27 @@
           End of chapter
         {/if}
       </button>
-      {#if $player.sleep.mode === "end_of_chapter" && $player.sleep.chapterTitle}
+      <button
+        type="button"
+        role="menuitem"
+        class="flex min-h-10 w-full items-center gap-2 rounded-lg px-2 text-left text-sm hover:bg-ra-surface-2 disabled:opacity-60"
+        disabled={applyingChapter || applyingNextChapter || !$player.book}
+        onclick={applyEndOfNextChapter}
+      >
+        {#if applyingNextChapter}
+          <span class="ra-spinner" aria-hidden="true"></span>
+          Finding chapter…
+        {:else}
+          End of next chapter
+        {/if}
+      </button>
+      {#if chapterSleepActive && $player.sleep.chapterTitle}
         <p class="px-2 pb-1 text-[11px] text-ra-muted">
-          Stops after: {$player.sleep.chapterTitle}
+          {#if $player.sleep.mode === "end_of_next_chapter"}
+            Stops after next: {$player.sleep.chapterTitle}
+          {:else}
+            Stops after: {$player.sleep.chapterTitle}
+          {/if}
         </p>
       {/if}
       <button
