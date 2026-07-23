@@ -12,7 +12,8 @@ export type BookSort =
   | "year_desc"
   | "year_asc"
   | "author_asc"
-  | "duration_desc";
+  | "duration_desc"
+  | "duration_asc";
 
 /** Author list sort. */
 export type AuthorSort =
@@ -38,6 +39,7 @@ export const BOOK_SORT_OPTIONS: { value: BookSort; label: string }[] = [
   { value: "year_asc", label: "Release date (oldest)" },
   { value: "author_asc", label: "Author A–Z" },
   { value: "duration_desc", label: "Longest first" },
+  { value: "duration_asc", label: "Shortest first" },
 ];
 
 export const AUTHOR_SORT_OPTIONS: { value: AuthorSort; label: string }[] = [
@@ -66,6 +68,30 @@ function yearOf(b: AudiobookSummary): number {
   return b.year ?? 0;
 }
 
+/** Positive duration only — missing/0 is unknown (not “shortest”). */
+function durationOf(b: AudiobookSummary): number | null {
+  const d = b.durationMs;
+  return d != null && d > 0 ? d : null;
+}
+
+/**
+ * Compare by duration. Unknown durations sort last for both longest/shortest
+ * so missing Plex duration doesn't look like 0-length books.
+ */
+function cmpDuration(
+  a: AudiobookSummary,
+  b: AudiobookSummary,
+  longestFirst: boolean,
+): number {
+  const da = durationOf(a);
+  const db = durationOf(b);
+  if (da == null && db == null) return cmpStr(a.title, b.title);
+  if (da == null) return 1;
+  if (db == null) return -1;
+  const diff = longestFirst ? db - da : da - db;
+  return diff || cmpStr(a.title, b.title);
+}
+
 export function sortBooks(
   books: AudiobookSummary[],
   sort: BookSort,
@@ -90,10 +116,9 @@ export function sortBooks(
           cmpStr(a.author ?? "", b.author ?? "") || cmpStr(a.title, b.title),
       );
     case "duration_desc":
-      return list.sort(
-        (a, b) =>
-          (b.durationMs ?? 0) - (a.durationMs ?? 0) || cmpStr(a.title, b.title),
-      );
+      return list.sort((a, b) => cmpDuration(a, b, true));
+    case "duration_asc":
+      return list.sort((a, b) => cmpDuration(a, b, false));
     default:
       return list;
   }

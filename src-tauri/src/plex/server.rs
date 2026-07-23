@@ -274,9 +274,7 @@ fn map_album_metadata(
 
     let year = m.get("year").and_then(|v| v.as_i64()).map(|y| y as i32);
 
-    let duration_ms = m.get("duration").and_then(|v| v.as_u64()).or_else(|| {
-        m.pointer("/Media/0/duration").and_then(|v| v.as_u64())
-    });
+    let duration_ms = extract_duration_ms(m);
 
     let thumb = m
         .get("thumb")
@@ -293,6 +291,51 @@ fn map_album_metadata(
         duration_ms,
         library_key: Some(library_key.into()),
     })
+}
+
+/// Plex may send duration as number or string; albums may only have Media/Part durations.
+fn json_duration_ms(v: Option<&serde_json::Value>) -> Option<u64> {
+    let v = v?;
+    match v {
+        serde_json::Value::Number(n) => n
+            .as_u64()
+            .or_else(|| n.as_f64().map(|f| f.round() as u64))
+            .filter(|&d| d > 0),
+        serde_json::Value::String(s) => s.parse::<u64>().ok().filter(|&d| d > 0),
+        _ => None,
+    }
+}
+
+fn extract_duration_ms(m: &serde_json::Value) -> Option<u64> {
+    if let Some(d) = json_duration_ms(m.get("duration")) {
+        return Some(d);
+    }
+    // Sum Media[] durations (multi-part albums)
+    if let Some(media) = m.get("Media").and_then(|v| v.as_array()) {
+        let mut sum = 0u64;
+        let mut any = false;
+        for med in media {
+            if let Some(d) = json_duration_ms(med.get("duration")) {
+                sum = sum.saturating_add(d);
+                any = true;
+                continue;
+            }
+            // Fall back to Part durations under this Media
+            if let Some(parts) = med.get("Part").and_then(|v| v.as_array()) {
+                for p in parts {
+                    if let Some(d) = json_duration_ms(p.get("duration")) {
+                        sum = sum.saturating_add(d);
+                        any = true;
+                    }
+                }
+            }
+        }
+        if any && sum > 0 {
+            return Some(sum);
+        }
+    }
+    json_duration_ms(m.pointer("/Media/0/duration"))
+        .or_else(|| json_duration_ms(m.pointer("/Media/0/Part/0/duration")))
 }
 
 /// Plex collection type (works for many section types including music).

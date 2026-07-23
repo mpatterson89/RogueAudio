@@ -14,6 +14,8 @@ export interface SettingsState {
   playerBarVisible: boolean;
   /** Books vs authors on library / collection detail */
   libraryViewMode: LibraryViewMode;
+  /** Library shows only offline downloads when true */
+  libraryInstalledOnly: boolean;
   bookSort: BookSort;
   authorSort: AuthorSort;
   collectionSort: CollectionSort;
@@ -25,6 +27,7 @@ const defaultSettings: SettingsState = {
   skipSeconds: 30,
   playerBarVisible: true,
   libraryViewMode: "books",
+  libraryInstalledOnly: false,
   bookSort: "title_asc",
   authorSort: "name_asc",
   collectionSort: "name_asc",
