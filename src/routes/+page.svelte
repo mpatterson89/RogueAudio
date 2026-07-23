@@ -4,12 +4,14 @@
   import { auth, isAuthenticated } from "$lib/stores/auth";
   import { library } from "$lib/stores/library";
   import { player } from "$lib/stores/player";
+  import { navBusy } from "$lib/stores/navBusy";
   import SearchBar from "$lib/components/library/SearchBar.svelte";
   import BookGrid from "$lib/components/library/BookGrid.svelte";
   import RetryPanel from "$lib/components/ui/RetryPanel.svelte";
   import { bookHref } from "$lib/nav";
 
   let search = $state("");
+  let openingKey = $state<string | null>(null);
 
   onMount(async () => {
     await auth.refresh();
@@ -34,9 +36,16 @@
   async function selectBook(book: (typeof $library.books)[0]) {
     const serverId = $library.serverId;
     if (!serverId) return;
-    // Load into the player (resume position) but don't start audio until Play/Resume.
-    await player.loadBook(serverId, book, { autoplay: false });
-    await goto(bookHref(serverId, book.ratingKey));
+    openingKey = book.ratingKey;
+    navBusy.start("Opening book…");
+    try {
+      // Navigate first so the book page paints immediately; load player in background.
+      await goto(bookHref(serverId, book.ratingKey));
+      void player.loadBook(serverId, book, { autoplay: false });
+    } finally {
+      navBusy.stop();
+      openingKey = null;
+    }
   }
 
   async function retryLibrary() {
@@ -205,7 +214,7 @@
     {:else}
       <BookGrid
         books={$library.books}
-        selectedKey={$player.book?.ratingKey}
+        selectedKey={openingKey ?? $player.book?.ratingKey}
         onselect={selectBook}
       />
     {/if}

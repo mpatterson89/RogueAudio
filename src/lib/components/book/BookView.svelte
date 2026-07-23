@@ -2,6 +2,7 @@
   import { goto } from "$app/navigation";
   import { progressApi } from "$lib/api/progress";
   import { player, formatTime } from "$lib/stores/player";
+  import { navBusy } from "$lib/stores/navBusy";
   import {
     downloads,
     downloadsByKey,
@@ -227,7 +228,18 @@
       onretry={load}
     />
     <div class="text-center">
-      <button type="button" class="btn-ghost" onclick={() => goto("/")}>Back to library</button>
+      <button
+        type="button"
+        class="btn-ghost"
+        onclick={async () => {
+          navBusy.start("Back to library…");
+          try {
+            await goto("/");
+          } finally {
+            navBusy.stop();
+          }
+        }}>Back to library</button
+      >
     </div>
   </div>
 {:else if detail}
@@ -253,7 +265,18 @@
     <div class="relative z-0 mx-auto max-w-5xl px-4 pb-10 pt-4 sm:px-6 sm:pt-6">
       <!-- Top bar -->
       <div class="mb-6 flex items-center justify-between gap-3">
-        <button type="button" class="btn-ghost" onclick={() => goto("/")}>
+        <button
+          type="button"
+          class="btn-ghost"
+          onclick={async () => {
+            navBusy.start("Back to library…");
+            try {
+              await goto("/");
+            } finally {
+              navBusy.stop();
+            }
+          }}
+        >
           ← Library
         </button>
         <div class="flex items-center gap-2">

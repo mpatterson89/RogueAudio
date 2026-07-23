@@ -2,6 +2,7 @@
   import { goto } from "$app/navigation";
   import { player, formatTime, PLAYBACK_RATES } from "$lib/stores/player";
   import { settings } from "$lib/stores/settings";
+  import { navBusy } from "$lib/stores/navBusy";
   import { resolveChapterWindow } from "$lib/chapterProgress";
   import { bookHref } from "$lib/nav";
   import SleepTimer from "./SleepTimer.svelte";
@@ -55,9 +56,14 @@
     }
   }
 
-  function openBookView() {
+  async function openBookView() {
     if (!$player.book || !$player.serverId) return;
-    void goto(bookHref($player.serverId, $player.book.ratingKey));
+    navBusy.start("Opening book…");
+    try {
+      await goto(bookHref($player.serverId, $player.book.ratingKey));
+    } finally {
+      navBusy.stop();
+    }
   }
 
   async function retryPlayback() {
