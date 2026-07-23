@@ -65,6 +65,14 @@ pub async fn get_book_detail(server_id: &str, rating_key: &str) -> AppResult<Boo
         .map(|s| s.to_string())
         .filter(|s| !s.is_empty());
 
+    // Series: first Collection tag, else none. Index: album `index` when > 0.
+    let series = extract_series_name(&album);
+    let series_index = album
+        .get("index")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32)
+        .filter(|&n| n > 0);
+
     let duration_ms = album.get("duration").and_then(|v| v.as_u64());
 
     let thumb = album
@@ -128,14 +136,30 @@ pub async fn get_book_detail(server_id: &str, rating_key: &str) -> AppResult<Boo
         duration_ms,
         library_key,
         studio,
+        series,
+        series_index,
         chapters,
         track_count,
     })
 }
 
+/// First non-empty Collection tag (common place series titles live in Plex).
+fn extract_series_name(meta: &Value) -> Option<String> {
+    let collections = meta.get("Collection")?.as_array()?;
+    for c in collections {
+        if let Some(tag) = c.get("tag").and_then(|v| v.as_str()) {
+            let t = tag.trim();
+            if !t.is_empty() {
+                return Some(t.to_string());
+            }
+        }
+    }
+    None
+}
+
 async fn fetch_metadata(session: &ServerSession, rating_key: &str) -> AppResult<Value> {
     let path = format!(
-        "/library/metadata/{rating_key}?includeChapters=1&includeFields=summary,art,thumb,title,year,studio,duration,parentTitle,originalTitle"
+        "/library/metadata/{rating_key}?includeChapters=1&includeCollections=1&includeFields=summary,art,thumb,title,year,studio,duration,parentTitle,originalTitle,index,Collection"
     );
     let raw: Value = pms_get_json(&session.base_uri, &path, &session.token).await?;
     raw.pointer("/MediaContainer/Metadata/0")

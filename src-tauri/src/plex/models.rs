@@ -141,6 +141,12 @@ pub struct BookDetail {
     pub duration_ms: Option<u64>,
     pub library_key: Option<String>,
     pub studio: Option<String>,
+    /// Series / collection name when known (Plex Collection or similar).
+    #[serde(default)]
+    pub series: Option<String>,
+    /// Position within the series when known (album index, etc.).
+    #[serde(default)]
+    pub series_index: Option<u32>,
     pub chapters: Vec<BookChapter>,
     pub track_count: u32,
 }

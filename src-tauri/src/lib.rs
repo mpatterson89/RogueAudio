@@ -1,4 +1,5 @@
 mod commands;
+mod covers;
 mod downloads;
 mod error;
 mod plex;
@@ -38,7 +39,14 @@ pub fn run() {
             download_enqueue,
             download_cancel,
             download_remove,
+            download_remove_all,
+            download_storage_bytes,
             download_local_playback,
+            // Cover art cache
+            cover_get_local,
+            cover_ensure,
+            cover_ensure_many,
+            cover_import,
         ])
         .run(tauri::generate_context!())
         .expect("error while running RogueAudio");

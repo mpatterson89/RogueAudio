@@ -1,6 +1,5 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
-  import { plexApi } from "$lib/api/plex";
   import { progressApi } from "$lib/api/progress";
   import { player, formatTime } from "$lib/stores/player";
   import {
@@ -10,6 +9,10 @@
     isDownloadComplete,
     formatBytes,
   } from "$lib/stores/downloads";
+  import {
+    getBookDetail,
+    peekBookDetail,
+  } from "$lib/stores/bookDetail";
   import { resolveChapterWindow } from "$lib/chapterProgress";
   import RetryPanel from "$lib/components/ui/RetryPanel.svelte";
   import SleepTimer from "$lib/components/player/SleepTimer.svelte";
@@ -26,6 +29,7 @@
   let detail = $state<BookDetail | null>(null);
   let progress = $state<ProgressSnapshot | null>(null);
   let loading = $state(true);
+  let refreshing = $state(false);
   let error = $state<string | null>(null);
   let summaryExpanded = $state(false);
   let loadGen = 0;
@@ -74,27 +78,53 @@
     void load();
   });
 
-  async function load() {
+  async function load(opts: { force?: boolean } = {}) {
+    const force = opts.force ?? false;
     const gen = ++loadGen;
-    loading = true;
     error = null;
     downloadError = null;
+
+    // Paint cached detail immediately (avoids blank flash + zero network)
+    if (!force) {
+      const cached = peekBookDetail(serverId, ratingKey);
+      if (cached) {
+        detail = cached;
+        loading = false;
+      } else {
+        loading = true;
+      }
+    } else {
+      refreshing = true;
+    }
+
     try {
       const [d, p] = await Promise.all([
-        plexApi.getBookDetail(serverId, ratingKey),
+        getBookDetail(serverId, ratingKey, { force }),
         progressApi.get(ratingKey).catch(() => null),
       ]);
       if (gen !== loadGen) return;
       detail = d;
       progress = p;
-      summaryExpanded = false;
+      if (force) summaryExpanded = false;
       void downloads.refresh();
     } catch (e) {
       if (gen !== loadGen) return;
-      error = e instanceof Error ? e.message : String(e);
+      // Keep showing cached detail if we had it
+      if (!detail) {
+        error = e instanceof Error ? e.message : String(e);
+      } else {
+        downloadError = e instanceof Error ? e.message : String(e);
+      }
     } finally {
-      if (gen === loadGen) loading = false;
+      if (gen === loadGen) {
+        loading = false;
+        refreshing = false;
+      }
     }
+  }
+
+  async function refreshDetail() {
+    await load({ force: true });
   }
 
   async function startDownload() {
@@ -226,13 +256,30 @@
         <button type="button" class="btn-ghost" onclick={() => goto("/")}>
           ← Library
         </button>
-        {#if isCurrent}
-          <span
-            class="rounded-full border border-ra-accent/40 bg-ra-accent-soft px-3 py-1 text-xs font-medium text-ra-accent"
+        <div class="flex items-center gap-2">
+          <button
+            type="button"
+            class="btn-ghost"
+            onclick={refreshDetail}
+            disabled={refreshing || loading}
+            title="Refresh book details from Plex"
+            aria-label="Refresh book details from Plex"
           >
-            Now playing
-          </span>
-        {/if}
+            {#if refreshing}
+              <span class="ra-spinner" aria-hidden="true"></span>
+            {:else}
+              <span aria-hidden="true">↻</span>
+            {/if}
+            Refresh
+          </button>
+          {#if isCurrent}
+            <span
+              class="rounded-full border border-ra-accent/40 bg-ra-accent-soft px-3 py-1 text-xs font-medium text-ra-accent"
+            >
+              Now playing
+            </span>
+          {/if}
+        </div>
       </div>
 
       <!-- Hero -->

@@ -4,6 +4,11 @@ import { getAudioEngine } from "$lib/audio/engine";
 import { progressApi } from "$lib/api/progress";
 import { plexApi } from "$lib/api/plex";
 import { downloadsApi } from "$lib/api/downloads";
+import {
+  getBookDetail,
+  seedBookDetail,
+  detailFromLocalPlayback,
+} from "$lib/stores/bookDetail";
 import type {
   AudiobookSummary,
   BookChapter,
@@ -340,10 +345,29 @@ function createPlayerStore() {
     const posMs = Math.max(0, s.positionSec * 1000);
     const bookDurMs = s.durationSec > 0 ? Math.floor(s.durationSec * 1000) : null;
 
-    // 1) Embedded / multi-file chapters from Plex book detail
+    // 1) Prefer chapters already on the player, then cached book detail
+    if (s.chapters.length > 0) {
+      const chapters = s.chapters;
+      for (let i = 0; i < chapters.length; i++) {
+        const ch = chapters[i];
+        const start = ch.startMs;
+        const end =
+          ch.endMs ??
+          chapters[i + 1]?.startMs ??
+          bookDurMs ??
+          start;
+        if (posMs >= start && posMs < end) {
+          return { endMs: end, title: ch.title };
+        }
+      }
+      const last = chapters[chapters.length - 1];
+      const end = last.endMs ?? bookDurMs ?? last.startMs;
+      return { endMs: end, title: last.title };
+    }
+
     if (s.book && s.serverId) {
       try {
-        const detail = await plexApi.getBookDetail(s.serverId, s.book.ratingKey);
+        const detail = await getBookDetail(s.serverId, s.book.ratingKey);
         const chapters = detail.chapters ?? [];
         if (chapters.length > 0) {
           for (let i = 0; i < chapters.length; i++) {
@@ -520,10 +544,12 @@ function createPlayerStore() {
         }));
         totalDurationMs = local.playback.totalDurationMs;
         chapters = local.chapters ?? [];
+        // Keep book-view cache warm from offline manifest (no Plex needed)
+        seedBookDetail(serverId, book.ratingKey, detailFromLocalPlayback(book.ratingKey, local));
       } else {
         const [playback, detail] = await Promise.all([
           plexApi.getPlayback(serverId, book.ratingKey),
-          plexApi.getBookDetail(serverId, book.ratingKey).catch(() => null),
+          getBookDetail(serverId, book.ratingKey).catch(() => null),
         ]);
         if (gen !== loadGen) return;
         tracks = playback.tracks ?? [];

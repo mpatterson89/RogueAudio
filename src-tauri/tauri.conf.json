@@ -25,9 +25,13 @@
         "enable": true,
         "scope": [
           "$HOME/.local/share/rogue-audio/downloads/**",
+          "$HOME/.local/share/rogue-audio/covers/**",
           "$APPDATA/rogue-audio/downloads/**",
+          "$APPDATA/rogue-audio/covers/**",
           "$LOCALDATA/rogue-audio/downloads/**",
-          "$DATA/rogue-audio/downloads/**"
+          "$LOCALDATA/rogue-audio/covers/**",
+          "$DATA/rogue-audio/downloads/**",
+          "$DATA/rogue-audio/covers/**"
         ]
       }
     }

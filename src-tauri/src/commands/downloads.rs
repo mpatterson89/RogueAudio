@@ -48,6 +48,8 @@ pub async fn download_enqueue(
             server_id,
             title: "Downloading…".into(),
             author: None,
+            series: None,
+            series_index: None,
             status: "downloading".into(),
             progress: 0.0,
             error: None,
@@ -55,9 +57,11 @@ pub async fn download_enqueue(
             track_count: 0,
             bytes_downloaded: 0,
             bytes_total: None,
+            bytes_on_disk: 0,
             duration_ms: None,
             cover_path: None,
             downloaded_at: None,
+            file_names: vec![],
         });
     };
 
@@ -79,6 +83,8 @@ pub async fn download_enqueue(
         server_id,
         title: "Downloading…".into(),
         author: None,
+        series: None,
+        series_index: None,
         status: "queued".into(),
         progress: 0.0,
         error: None,
@@ -86,9 +92,11 @@ pub async fn download_enqueue(
         track_count: 0,
         bytes_downloaded: 0,
         bytes_total: None,
+        bytes_on_disk: 0,
         duration_ms: None,
         cover_path: None,
         downloaded_at: None,
+        file_names: vec![],
     })
 }
 
@@ -108,6 +116,24 @@ pub fn download_remove(
 ) -> AppResult<()> {
     manager.request_cancel(&rating_key);
     downloads::remove_download(&rating_key)
+}
+
+/// Delete all offline audiobook folders. Returns how many book folders were removed.
+#[tauri::command]
+pub fn download_remove_all(manager: State<'_, Arc<DownloadManager>>) -> AppResult<u32> {
+    // Best-effort: cancel any active jobs first by listing known keys
+    if let Ok(items) = downloads::list_downloads() {
+        for item in items {
+            manager.request_cancel(&item.rating_key);
+        }
+    }
+    downloads::remove_all_downloads()
+}
+
+/// Total disk bytes used by offline downloads.
+#[tauri::command]
+pub fn download_storage_bytes() -> AppResult<u64> {
+    downloads::total_storage_bytes()
 }
 
 /// Local playback playlist when a complete download exists (absolute file paths).

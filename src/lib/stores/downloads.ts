@@ -1,6 +1,10 @@
 import { writable, get, derived } from "svelte/store";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { downloadsApi } from "$lib/api/downloads";
+import {
+  detailFromLocalPlayback,
+  seedBookDetail,
+} from "$lib/stores/bookDetail";
 import type { DownloadItem } from "$lib/types/downloads";
 
 interface DownloadsState {
@@ -47,6 +51,22 @@ function createDownloadsStore() {
             pending,
           };
         });
+        // Warm book-view cache from offline manifest when a download finishes
+        if (item.status === "complete" && item.serverId) {
+          void downloadsApi
+            .localPlayback(item.ratingKey)
+            .then((local) => {
+              if (!local) return;
+              seedBookDetail(
+                item.serverId,
+                item.ratingKey,
+                detailFromLocalPlayback(item.ratingKey, local),
+              );
+            })
+            .catch(() => {
+              /* ignore */
+            });
+        }
       });
     } catch {
       /* not in Tauri / events unavailable */
@@ -110,6 +130,12 @@ function createDownloadsStore() {
         ...s,
         items: s.items.filter((i) => i.ratingKey !== ratingKey),
       }));
+    },
+
+    async removeAll() {
+      const n = await downloadsApi.removeAll();
+      update((s) => ({ ...s, items: [] }));
+      return n;
     },
 
     getItem(ratingKey: string): DownloadItem | null {

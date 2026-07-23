@@ -1,7 +1,8 @@
 //! Offline audiobook downloads.
 //!
-//! Stores progressive MP3 tracks (same transcoder path as online playback) under
+//! Stores **original** library media parts (m4b/m4a/mp3/…) under
 //! `~/.local/share/rogue-audio/downloads/{ratingKey}/` plus a manifest.json.
+//! Online streaming still uses the MP3 transcoder for WebKit compatibility.
 
 use crate::error::{AppError, AppResult};
 use crate::plex::{self, BookChapter, BookDetail, PlaybackInfo, PlaybackTrack};
@@ -50,6 +51,9 @@ pub struct DownloadTrackMeta {
     pub duration_ms: Option<u64>,
     pub file_name: String,
     pub bytes: u64,
+    /// Original container/extension (m4b, mp3, …).
+    #[serde(default)]
+    pub container: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +69,13 @@ pub struct DownloadManifest {
     pub duration_ms: Option<u64>,
     pub library_key: Option<String>,
     pub studio: Option<String>,
+    #[serde(default)]
+    pub series: Option<String>,
+    #[serde(default)]
+    pub series_index: Option<u32>,
+    /// Base file stem: Title-Series-Index-Author (no spaces).
+    #[serde(default)]
+    pub file_stem: Option<String>,
     pub chapters: Vec<BookChapter>,
     pub tracks: Vec<DownloadTrackMeta>,
     pub cover_file: Option<String>,
@@ -90,6 +101,8 @@ pub struct DownloadItem {
     pub server_id: String,
     pub title: String,
     pub author: Option<String>,
+    pub series: Option<String>,
+    pub series_index: Option<u32>,
     pub status: String,
     /// Whole-book progress 0.0 ..= 1.0
     pub progress: f32,
@@ -98,10 +111,14 @@ pub struct DownloadItem {
     pub track_count: u32,
     pub bytes_downloaded: u64,
     pub bytes_total: Option<u64>,
+    /// Actual bytes on disk under the book folder (audio + cover + manifest).
+    pub bytes_on_disk: u64,
     pub duration_ms: Option<u64>,
     /// Absolute path to cover when present (frontend converts via convertFileSrc).
     pub cover_path: Option<String>,
     pub downloaded_at: Option<String>,
+    /// Primary audio file name(s) for display.
+    pub file_names: Vec<String>,
 }
 
 impl From<&DownloadManifest> for DownloadItem {
@@ -111,11 +128,19 @@ impl From<&DownloadManifest> for DownloadItem {
                 .ok()
                 .map(|d| d.join(name).to_string_lossy().to_string())
         });
+        let bytes_on_disk = dir_size(&m.rating_key).unwrap_or(m.bytes_downloaded);
+        let file_names: Vec<String> = m
+            .tracks
+            .iter()
+            .map(|t| t.file_name.clone())
+            .collect();
         Self {
             rating_key: m.rating_key.clone(),
             server_id: m.server_id.clone(),
             title: m.title.clone(),
             author: m.author.clone(),
+            series: m.series.clone(),
+            series_index: m.series_index,
             status: m.status.as_str().to_string(),
             progress: m.progress,
             error: m.error.clone(),
@@ -123,22 +148,162 @@ impl From<&DownloadManifest> for DownloadItem {
             track_count: m.track_count,
             bytes_downloaded: m.bytes_downloaded,
             bytes_total: m.bytes_total,
+            bytes_on_disk,
             duration_ms: m.duration_ms,
             cover_path,
             downloaded_at: m.downloaded_at.clone(),
+            file_names,
         }
     }
 }
 
-/// Matches `maxAudioBitrate=320` on the universal transcoder.
-const TRANSCODE_BITRATE_BPS: f64 = 320_000.0;
+/// Strip spaces/punctuation → alphanumeric slug for file names.
+fn fs_slug(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect()
+}
 
-/// Estimated on-disk size for a progressive MP3 of the given duration.
-fn estimate_mp3_bytes(duration_ms: Option<u64>) -> Option<u64> {
+/// `{title}-{series?}-{index?}-{author?}` with no spaces.
+pub fn book_file_stem(
+    title: &str,
+    series: Option<&str>,
+    series_index: Option<u32>,
+    author: Option<&str>,
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let t = fs_slug(title);
+    parts.push(if t.is_empty() {
+        "Audiobook".into()
+    } else {
+        t
+    });
+    if let Some(s) = series.map(str::trim).filter(|s| !s.is_empty()) {
+        let slug = fs_slug(s);
+        if !slug.is_empty() {
+            parts.push(slug);
+        }
+    }
+    if let Some(i) = series_index.filter(|&n| n > 0) {
+        parts.push(i.to_string());
+    }
+    if let Some(a) = author.map(str::trim).filter(|a| !a.is_empty()) {
+        let slug = fs_slug(a);
+        if !slug.is_empty() {
+            parts.push(slug);
+        }
+    }
+    parts.join("-")
+}
+
+fn audio_file_name(stem: &str, part_index: usize, part_count: usize, ext: &str) -> String {
+    let ext = ext.trim_matches('.').to_ascii_lowercase();
+    let ext = if ext.is_empty() { "bin" } else { ext.as_str() };
+    if part_count <= 1 {
+        format!("{stem}.{ext}")
+    } else {
+        format!("{stem}-part{:03}.{ext}", part_index + 1)
+    }
+}
+
+fn dir_size(rating_key: &str) -> AppResult<u64> {
+    let dir = downloads_root()?.join(safe_key(rating_key));
+    if !dir.is_dir() {
+        return Ok(0);
+    }
+    let mut total = 0u64;
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            total = total.saturating_add(entry.metadata()?.len());
+        }
+    }
+    Ok(total)
+}
+
+/// After raw download as track_NNN.ext, rename to human-readable stem names.
+fn rename_tracks_to_stem(
+    dir: &Path,
+    stem: &str,
+    tracks: &mut [DownloadTrackMeta],
+) -> AppResult<()> {
+    let n = tracks.len();
+    for (i, t) in tracks.iter_mut().enumerate() {
+        let ext = t
+            .container
+            .as_deref()
+            .or_else(|| {
+                t.file_name
+                    .rsplit('.')
+                    .next()
+                    .filter(|e| *e != t.file_name.as_str())
+            })
+            .unwrap_or("bin");
+        let new_name = audio_file_name(stem, i, n, ext);
+        if t.file_name == new_name {
+            continue;
+        }
+        let from = dir.join(&t.file_name);
+        let to = dir.join(&new_name);
+        if from.exists() {
+            if to.exists() && to != from {
+                let _ = fs::remove_file(&to);
+            }
+            fs::rename(&from, &to)?;
+            // Drop stale m4a playback hardlinks for old names
+            let old_m4a = from.with_extension("m4a");
+            if old_m4a.exists() {
+                let _ = fs::remove_file(&old_m4a);
+            }
+        }
+        t.file_name = new_name;
+    }
+    Ok(())
+}
+
+/// Fallback size estimate when Plex omits Part.size (~128 kbps AAC-ish).
+const FALLBACK_BITRATE_BPS: f64 = 128_000.0;
+
+fn estimate_bytes_from_duration(duration_ms: Option<u64>) -> Option<u64> {
     let ms = duration_ms.filter(|&d| d > 0)?;
     let secs = ms as f64 / 1000.0;
-    // 320 kbps + small container overhead
-    Some((secs * TRANSCODE_BITRATE_BPS / 8.0 * 1.02).round() as u64)
+    Some((secs * FALLBACK_BITRATE_BPS / 8.0).round() as u64)
+}
+
+fn container_from_file_name(name: &str) -> String {
+    name.rsplit('.')
+        .next()
+        .map(|e| e.to_ascii_lowercase())
+        .filter(|e| !e.is_empty() && e != name)
+        .unwrap_or_else(|| "bin".into())
+}
+
+/// For containers WebKit handles poorly by extension, expose a playable alias.
+fn playback_friendly_path(path: &Path, container: &str) -> PathBuf {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let needs_alias = ext == "m4b" || container.eq_ignore_ascii_case("m4b");
+    if !needs_alias {
+        return path.to_path_buf();
+    }
+    let alias = path.with_extension("m4a");
+    if alias.exists() {
+        return alias;
+    }
+    // Hard link shares the same inode — no extra disk use; keeps original .m4b name.
+    if fs::hard_link(path, &alias).is_ok() {
+        return alias;
+    }
+    #[cfg(unix)]
+    {
+        if std::os::unix::fs::symlink(path, &alias).is_ok() {
+            return alias;
+        }
+    }
+    path.to_path_buf()
 }
 
 /// Whole-book progress from completed parts + the in-flight part.
@@ -301,9 +466,18 @@ pub struct LocalPlayback {
     pub chapters: Vec<BookChapter>,
     pub title: String,
     pub author: Option<String>,
+    pub summary: Option<String>,
+    pub year: Option<i32>,
+    pub duration_ms: Option<u64>,
+    pub library_key: Option<String>,
+    pub studio: Option<String>,
+    pub track_count: u32,
+    pub server_id: String,
+    /// Absolute path to cover.jpg when present.
+    pub cover_path: Option<String>,
 }
 
-/// Build PlaybackInfo pointing at local MP3 files (absolute paths in `url`).
+/// Build PlaybackInfo pointing at local original files (absolute paths in `url`).
 pub fn local_playback(rating_key: &str) -> AppResult<Option<LocalPlayback>> {
     let Some(m) = read_manifest(rating_key)? else {
         return Ok(None);
@@ -321,27 +495,45 @@ pub fn local_playback(rating_key: &str) -> AppResult<Option<LocalPlayback>> {
                 t.file_name
             )));
         }
+        let container = t
+            .container
+            .clone()
+            .unwrap_or_else(|| container_from_file_name(&t.file_name));
+        // WebKit often won't map .m4b → audio/*; hardlink as .m4a for the asset URL only.
+        // The on-disk original remains .m4b (or whatever was downloaded).
+        let play_path = playback_friendly_path(&path, &container);
         tracks.push(PlaybackTrack {
             rating_key: t.rating_key.clone(),
             title: t.title.clone(),
             index: t.index,
             duration_ms: t.duration_ms,
-            url: path.to_string_lossy().to_string(),
-            container: Some("mp3".into()),
+            url: play_path.to_string_lossy().to_string(),
+            container: Some(container),
         });
     }
     if tracks.is_empty() {
         return Ok(None);
     }
+    let cover_path = m.cover_file.as_ref().map(|name| {
+        dir.join(name).to_string_lossy().to_string()
+    });
     Ok(Some(LocalPlayback {
         playback: PlaybackInfo {
-            book_rating_key: m.rating_key,
+            book_rating_key: m.rating_key.clone(),
             tracks,
             total_duration_ms: m.duration_ms,
         },
         chapters: m.chapters,
         title: m.title,
         author: m.author,
+        summary: m.summary,
+        year: m.year,
+        duration_ms: m.duration_ms,
+        library_key: m.library_key,
+        studio: m.studio,
+        track_count: m.track_count,
+        server_id: m.server_id,
+        cover_path,
     }))
 }
 
@@ -351,6 +543,45 @@ pub fn remove_download(rating_key: &str) -> AppResult<()> {
         fs::remove_dir_all(&dir)?;
     }
     Ok(())
+}
+
+/// Delete every offline book folder under the downloads root.
+pub fn remove_all_downloads() -> AppResult<u32> {
+    let root = downloads_root()?;
+    if !root.exists() {
+        return Ok(0);
+    }
+    let mut n = 0u32;
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            fs::remove_dir_all(entry.path())?;
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+/// Total bytes used by all offline books (for settings summary).
+pub fn total_storage_bytes() -> AppResult<u64> {
+    let root = downloads_root()?;
+    if !root.exists() {
+        return Ok(0);
+    }
+    let mut total = 0u64;
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        for f in fs::read_dir(entry.path())? {
+            let f = f?;
+            if f.file_type()?.is_file() {
+                total = total.saturating_add(f.metadata()?.len());
+            }
+        }
+    }
+    Ok(total)
 }
 
 /// HTTP client with a long timeout for multi-hour audiobook pulls.
@@ -487,6 +718,9 @@ pub async fn run_download(
         duration_ms: None,
         library_key: None,
         studio: None,
+        series: None,
+        series_index: None,
+        file_stem: None,
         chapters: vec![],
         tracks: vec![],
         cover_file: None,
@@ -505,33 +739,53 @@ pub async fn run_download(
 
     let result = async {
         let detail = plex::get_book_detail(&server_id, &rating_key).await?;
-        // Full book playlist: every audio part under the album/book (not a single chapter).
-        let playback = plex::get_playback(&server_id, &rating_key).await?;
+        // Full book: every original media part (m4b/mp3/…), not transcoder streams.
+        let parts = plex::get_downloadable_parts(&server_id, &rating_key).await?;
 
-        if playback.tracks.is_empty() {
+        if parts.is_empty() {
             return Err(AppError::Message("no playable tracks to download".into()));
         }
+
+        let total_duration_ms: Option<u64> = {
+            let sum: u64 = parts.iter().filter_map(|p| p.duration_ms).sum();
+            if sum > 0 {
+                Some(sum)
+            } else {
+                detail.duration_ms
+            }
+        };
 
         manifest.title = detail.title.clone();
         manifest.author = detail.author.clone();
         manifest.summary = detail.summary.clone();
         manifest.year = detail.year;
-        manifest.duration_ms = detail.duration_ms.or(playback.total_duration_ms);
+        manifest.duration_ms = total_duration_ms.or(detail.duration_ms);
         manifest.library_key = detail.library_key.clone();
         manifest.studio = detail.studio.clone();
+        manifest.series = detail.series.clone();
+        manifest.series_index = detail.series_index;
+        manifest.file_stem = Some(book_file_stem(
+            &detail.title,
+            detail.series.as_deref(),
+            detail.series_index,
+            detail.author.as_deref(),
+        ));
         manifest.chapters = detail.chapters.clone();
-        manifest.track_count = playback.tracks.len() as u32;
-        // Initial whole-book size guess from total duration (320 kbps MP3)
-        let part_estimates: Vec<u64> = playback
-            .tracks
+        manifest.track_count = parts.len() as u32;
+        // Prefer Plex Part.size for accurate whole-book progress
+        let part_estimates: Vec<u64> = parts
             .iter()
-            .map(|t| estimate_mp3_bytes(t.duration_ms).unwrap_or(0))
+            .map(|p| {
+                p.size_bytes
+                    .or_else(|| estimate_bytes_from_duration(p.duration_ms))
+                    .unwrap_or(0)
+            })
             .collect();
         let book_estimate: u64 = part_estimates.iter().sum();
         let book_estimate = if book_estimate > 0 {
             book_estimate
         } else {
-            estimate_mp3_bytes(manifest.duration_ms).unwrap_or(0)
+            estimate_bytes_from_duration(manifest.duration_ms).unwrap_or(0)
         };
         manifest.bytes_total = (book_estimate > 0).then_some(book_estimate);
         manifest.updated_at = now_rfc3339();
@@ -542,37 +796,54 @@ pub async fn run_download(
 
         // Cover is best-effort (does not affect book progress %)
         if let Some(cover) = try_download_cover(&client, &detail, &dir, &cancel).await {
-            manifest.cover_file = Some(cover);
+            manifest.cover_file = Some(cover.clone());
+            // Also land in the shared library cover cache
+            let cover_path = dir.join(&cover);
+            if let Err(e) = crate::covers::import_file(&server_id, &rating_key, &cover_path) {
+                eprintln!("cover cache import failed: {e}");
+            }
             write_manifest(&manifest)?;
         }
 
-        let n_parts = playback.tracks.len();
+        let n_parts = parts.len();
         let mut track_metas: Vec<DownloadTrackMeta> = Vec::with_capacity(n_parts);
         let mut last_emit_bytes = 0u64;
 
-        for (i, track) in playback.tracks.iter().enumerate() {
+        for (i, part) in parts.iter().enumerate() {
             if cancel.load(Ordering::SeqCst) {
                 return Err(AppError::Message("download cancelled".into()));
             }
 
-            let file_name = format!("track_{i:03}.mp3");
+            let ext = part.file_ext.trim_matches('.').to_ascii_lowercase();
+            let ext = if ext.is_empty() {
+                "bin".to_string()
+            } else {
+                ext
+            };
+            let file_name = format!("track_{i:03}.{ext}");
             let dest = dir.join(&file_name);
             let track_index = i as u32;
             let completed_bytes: u64 = track_metas.iter().map(|t| t.bytes).sum();
-            let future_estimates: Vec<u64> = playback.tracks[i + 1..]
+            let future_estimates: Vec<u64> = parts[i + 1..]
                 .iter()
-                .map(|t| estimate_mp3_bytes(t.duration_ms).unwrap_or(0))
+                .map(|p| {
+                    p.size_bytes
+                        .or_else(|| estimate_bytes_from_duration(p.duration_ms))
+                        .unwrap_or(0)
+                })
                 .collect();
-            let duration_est = estimate_mp3_bytes(track.duration_ms);
+            let size_est = part
+                .size_bytes
+                .or_else(|| estimate_bytes_from_duration(part.duration_ms));
 
             let bytes = download_url_to_file(
                 &client,
-                &track.url,
+                &part.url,
                 &dest,
                 &cancel,
                 |n, content_length| {
-                    // Prefer real Content-Length; else duration→bitrate estimate for this part
-                    let expected = content_length.or(duration_est);
+                    // Prefer Content-Length, then Plex Part.size, then duration guess
+                    let expected = content_length.or(size_est);
                     let (progress, total) =
                         whole_book_progress(completed_bytes, n, expected, &future_estimates);
                     manifest.progress = progress;
@@ -581,7 +852,7 @@ pub async fn run_download(
                     manifest.tracks_done = i as u32; // current part not finished yet
                     manifest.updated_at = now_rfc3339();
 
-                    // Throttle UI/disk: first chunk, every ~256 KiB, or end of growth spurts
+                    // Throttle UI/disk: first chunk, every ~256 KiB
                     let delta = manifest
                         .bytes_downloaded
                         .saturating_sub(last_emit_bytes);
@@ -596,18 +867,18 @@ pub async fn run_download(
 
             track_metas.push(DownloadTrackMeta {
                 index: track_index,
-                rating_key: track.rating_key.clone(),
-                title: track.title.clone(),
-                duration_ms: track.duration_ms,
+                rating_key: part.rating_key.clone(),
+                title: part.title.clone(),
+                duration_ms: part.duration_ms,
                 file_name,
                 bytes,
+                container: Some(part.container.clone()),
             });
 
             let done_bytes: u64 = track_metas.iter().map(|t| t.bytes).sum();
             let remaining_est: u64 = future_estimates.iter().sum();
             let total_after = done_bytes.saturating_add(remaining_est).max(done_bytes);
             let progress_after = if remaining_est == 0 {
-                // More parts may remain with unknown duration — use part index
                 if i + 1 >= n_parts {
                     1.0
                 } else {
@@ -632,7 +903,7 @@ pub async fn run_download(
             emit_item(&app, &DownloadItem::from(&manifest));
         }
 
-        // Sanity: we must have saved every part of the book playlist
+        // Sanity: we must have saved every part of the book
         if track_metas.len() != n_parts {
             return Err(AppError::Message(format!(
                 "download incomplete: got {} of {} parts",
@@ -640,6 +911,18 @@ pub async fn run_download(
                 n_parts
             )));
         }
+
+        // Rename track_000.ext → Title-Series-1-Author.ext (no spaces)
+        let stem = manifest
+            .file_stem
+            .clone()
+            .unwrap_or_else(|| book_file_stem(&manifest.title, None, None, manifest.author.as_deref()));
+        if let Err(e) = rename_tracks_to_stem(&dir, &stem, &mut track_metas) {
+            eprintln!("rename download files failed: {e}");
+        }
+        manifest.file_stem = Some(stem);
+        manifest.tracks = track_metas;
+        manifest.bytes_downloaded = manifest.tracks.iter().map(|t| t.bytes).sum();
 
         manifest.status = DownloadStatus::Complete;
         manifest.progress = 1.0;

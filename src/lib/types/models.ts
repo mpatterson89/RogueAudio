@@ -89,6 +89,8 @@ export interface BookDetail {
   durationMs?: number | null;
   libraryKey?: string | null;
   studio?: string | null;
+  series?: string | null;
+  seriesIndex?: number | null;
   chapters: BookChapter[];
   trackCount: number;
 }

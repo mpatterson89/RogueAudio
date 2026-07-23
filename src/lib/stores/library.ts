@@ -1,6 +1,7 @@
 import { writable, get } from "svelte/store";
 import { plexApi } from "$lib/api/plex";
 import { filterMusicLibraries, pickDefaultLibrary } from "$lib/plex/libraries";
+import { hydrateBookCovers } from "$lib/covers";
 import type { AudiobookSummary, PlexLibrary, PlexServer } from "$lib/types/models";
 
 const CACHE_KEY = "rogueaudio.libraryCache";
@@ -184,8 +185,31 @@ function createLibraryStore() {
     fetchedAt = Date.now(),
   ) {
     const key = booksCacheKey(serverId, libraryKey);
+    // Always store remote Plex thumb URLs in the durable cache (not asset://).
     mem.booksByKey.set(key, books);
     mem.lastFetchedByKey.set(key, fetchedAt);
+  }
+
+  /**
+   * Show books immediately, then rewrite thumbs to on-disk covers in the background.
+   * Durable cache keeps remote URLs; UI state gets local asset URLs.
+   */
+  async function applyBooksWithCovers(
+    serverId: string,
+    libraryKey: string,
+    remoteBooks: AudiobookSummary[],
+    query: string,
+    extra: Partial<LibraryState> = {},
+  ) {
+    applyBooks(remoteBooks, query, { ...extra, serverId, libraryKey });
+    try {
+      const withCovers = await hydrateBookCovers(serverId, remoteBooks);
+      const cur = get(store);
+      if (cur.serverId !== serverId || cur.libraryKey !== libraryKey) return;
+      applyBooks(withCovers, cur.query, { serverId, libraryKey });
+    } catch {
+      /* remote thumbs already showing */
+    }
   }
 
   return {
@@ -203,13 +227,11 @@ function createLibraryStore() {
       if (s.servers.length > 0 && s.serverId && s.libraryKey) {
         const key = booksCacheKey(s.serverId, s.libraryKey);
         if (mem.booksByKey.has(key)) {
-          // Keep displayed books in sync with cache if store was partially reset
-          if (s.allBooks !== mem.booksByKey.get(key)) {
-            const cached = mem.booksByKey.get(key)!;
-            applyBooks(cached, s.query, {
-              lastFetchedAt: mem.lastFetchedByKey.get(key) ?? s.lastFetchedAt,
-            });
-          }
+          const cached = mem.booksByKey.get(key)!;
+          // Resolve on-disk covers (no Plex list call)
+          await applyBooksWithCovers(s.serverId, s.libraryKey, cached, s.query, {
+            lastFetchedAt: mem.lastFetchedByKey.get(key) ?? s.lastFetchedAt,
+          });
           return;
         }
       }
@@ -230,11 +252,9 @@ function createLibraryStore() {
         if (mem.booksByKey.has(key)) {
           const cached = mem.booksByKey.get(key)!;
           const libs = mem.librariesByServer.get(s.serverId) ?? s.libraries;
-          applyBooks(cached, s.query, {
+          await applyBooksWithCovers(s.serverId, s.libraryKey, cached, s.query, {
             servers: mem.servers ?? s.servers,
             libraries: libs,
-            serverId: s.serverId,
-            libraryKey: s.libraryKey,
             lastFetchedAt: mem.lastFetchedByKey.get(key) ?? s.lastFetchedAt,
           });
           return;
@@ -405,9 +425,7 @@ function createLibraryStore() {
 
       if (!force && mem.booksByKey.has(key)) {
         const allBooks = mem.booksByKey.get(key)!;
-        applyBooks(allBooks, query, {
-          serverId,
-          libraryKey,
+        await applyBooksWithCovers(serverId, libraryKey, allBooks, query, {
           lastFetchedAt: mem.lastFetchedByKey.get(key) ?? null,
         });
         return;
@@ -430,12 +448,10 @@ function createLibraryStore() {
         const allBooks = await plexApi.listBooks(serverId, libraryKey);
         const fetchedAt = Date.now();
         setCachedBooks(serverId, libraryKey, allBooks, fetchedAt);
-        applyBooks(allBooks, query, {
-          serverId,
-          libraryKey,
+        persist();
+        await applyBooksWithCovers(serverId, libraryKey, allBooks, query, {
           lastFetchedAt: fetchedAt,
         });
-        persist();
       } catch (e) {
         update((st) => ({
           ...st,

@@ -9,6 +9,8 @@ export const downloadsApi = {
     invoke<DownloadItem>("download_enqueue", { serverId, ratingKey }),
   cancel: (ratingKey: string) => invoke<void>("download_cancel", { ratingKey }),
   remove: (ratingKey: string) => invoke<void>("download_remove", { ratingKey }),
+  removeAll: () => invoke<number>("download_remove_all"),
+  storageBytes: () => invoke<number>("download_storage_bytes"),
   localPlayback: (ratingKey: string) =>
     invoke<LocalPlayback | null>("download_local_playback", { ratingKey }),
 };
