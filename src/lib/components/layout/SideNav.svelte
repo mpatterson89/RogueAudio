@@ -1,6 +1,8 @@
 <script lang="ts">
   import { page } from "$app/stores";
   import { auth } from "$lib/stores/auth";
+  import { settings } from "$lib/stores/settings";
+  import { player } from "$lib/stores/player";
 
   const links = [
     { href: "/", label: "Library", icon: "📚" },
@@ -31,10 +33,9 @@
       {@const active = $page.url.pathname === link.href}
       <a
         href={link.href}
-        class="flex min-h-11 items-center gap-3 rounded-xl px-3 text-sm font-medium transition-colors
-          {active
-          ? 'bg-ra-accent-soft text-ra-text'
-          : 'text-ra-muted hover:bg-ra-surface-2 hover:text-ra-text'}"
+        class={active
+          ? "flex min-h-11 items-center gap-3 rounded-xl bg-ra-accent-soft px-3 text-sm font-medium text-ra-text transition-colors"
+          : "flex min-h-11 items-center gap-3 rounded-xl px-3 text-sm font-medium text-ra-muted transition-colors hover:bg-ra-surface-2 hover:text-ra-text"}
         aria-current={active ? "page" : undefined}
       >
         <span class="text-base" aria-hidden="true">{link.icon}</span>
@@ -43,18 +44,75 @@
     {/each}
   </nav>
 
-  <div class="border-t border-ra-border p-3 text-xs text-ra-muted">
-    {#if $auth.status.authenticated}
-      <p
-        class="hidden truncate sm:block"
-        title={$auth.status.username?.trim() || "Signed in"}
+  <div class="space-y-2 border-t border-ra-border p-2">
+    <button
+      type="button"
+      class="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 text-sm font-medium text-ra-muted transition-colors hover:bg-ra-surface-2 hover:text-ra-text"
+      onclick={() => settings.togglePlayerBar()}
+      title={$settings.playerBarVisible ? "Hide player" : "Show player"}
+      aria-pressed={$settings.playerBarVisible}
+      aria-label={$settings.playerBarVisible ? "Hide player" : "Show player"}
+    >
+      <span class="text-base" aria-hidden="true"
+        >{$settings.playerBarVisible ? "▼" : "▲"}</span
       >
-        {$auth.status.username?.trim() || "Signed in"}
-      </p>
-      <p class="sm:hidden text-center" title="Signed in">●</p>
-    {:else}
-      <p class="hidden sm:block">Not signed in</p>
-      <p class="sm:hidden text-center opacity-50">○</p>
-    {/if}
+      <span class="hidden min-w-0 truncate sm:inline">
+        {$settings.playerBarVisible ? "Hide player" : "Show player"}
+      </span>
+      {#if !$settings.playerBarVisible && $player.playing}
+        <span class="eq-nav shrink-0" aria-hidden="true"><i></i><i></i><i></i></span>
+      {/if}
+    </button>
+
+    <div class="px-1 text-xs text-ra-muted">
+      {#if $auth.status.authenticated}
+        <p
+          class="hidden truncate sm:block"
+          title={$auth.status.username?.trim() || "Signed in"}
+        >
+          {$auth.status.username?.trim() || "Signed in"}
+        </p>
+        <p class="sm:hidden text-center" title="Signed in">●</p>
+      {:else}
+        <p class="hidden sm:block">Not signed in</p>
+        <p class="sm:hidden text-center opacity-50">○</p>
+      {/if}
+    </div>
   </div>
 </aside>
+
+<style>
+  .eq-nav {
+    display: flex;
+    align-items: flex-end;
+    gap: 2px;
+    height: 12px;
+  }
+  .eq-nav i {
+    display: block;
+    width: 2.5px;
+    border-radius: 1px;
+    background: var(--color-ra-accent);
+    animation: ra-eq 0.9s ease-in-out infinite;
+  }
+  .eq-nav i:nth-child(1) {
+    height: 40%;
+  }
+  .eq-nav i:nth-child(2) {
+    height: 80%;
+    animation-delay: 0.15s;
+  }
+  .eq-nav i:nth-child(3) {
+    height: 55%;
+    animation-delay: 0.3s;
+  }
+  @keyframes ra-eq {
+    0%,
+    100% {
+      transform: scaleY(0.45);
+    }
+    50% {
+      transform: scaleY(1);
+    }
+  }
+</style>

@@ -7,12 +7,15 @@ export interface SettingsState {
   sleepFadeSeconds: number;
   /** Default skip interval */
   skipSeconds: number;
+  /** Whether the bottom player chrome is visible */
+  playerBarVisible: boolean;
 }
 
 const defaultSettings: SettingsState = {
   reduceMotion: false,
   sleepFadeSeconds: 15,
   skipSeconds: 30,
+  playerBarVisible: true,
 };
 
 function load(): SettingsState {
@@ -35,6 +38,17 @@ function createSettingsStore() {
     patch(partial: Partial<SettingsState>) {
       update((s) => {
         const next = { ...s, ...partial };
+        try {
+          localStorage.setItem("rogueaudio.settings", JSON.stringify(next));
+        } catch {
+          /* ignore */
+        }
+        return next;
+      });
+    },
+    togglePlayerBar() {
+      update((s) => {
+        const next = { ...s, playerBarVisible: !s.playerBarVisible };
         try {
           localStorage.setItem("rogueaudio.settings", JSON.stringify(next));
         } catch {

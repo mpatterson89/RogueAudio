@@ -1,7 +1,7 @@
 use crate::error::AppResult;
 use crate::plex::{
-    self, AudiobookSummary, AuthStatus, PlaybackInfo, PinAuthPoll, PinAuthStart, PlexLibrary,
-    PlexServer, StreamInfo,
+    self, AudiobookSummary, AuthStatus, BookDetail, PlaybackInfo, PinAuthPoll, PinAuthStart,
+    PlexLibrary, PlexServer, StreamInfo,
 };
 use crate::PlexAuthState;
 use tauri::State;
@@ -73,6 +73,18 @@ pub async fn plex_list_books(
         return Err(crate::error::AppError::NotAuthenticated);
     }
     plex::list_books(&server_id, &library_key, query.as_deref()).await
+}
+
+/// Full book detail for the book view (summary, art, chapters).
+#[tauri::command]
+pub async fn plex_get_book_detail(
+    server_id: String,
+    rating_key: String,
+) -> AppResult<BookDetail> {
+    if !plex::is_authenticated() {
+        return Err(crate::error::AppError::NotAuthenticated);
+    }
+    plex::get_book_detail(&server_id, &rating_key).await
 }
 
 /// Resolve a book/album (or track) into an ordered list of stream URLs.

@@ -1,9 +1,13 @@
 mod commands;
+mod covers;
+mod downloads;
 mod error;
 mod plex;
 mod storage;
 
 use commands::*;
+use downloads::DownloadManager;
+use std::sync::Arc;
 pub use plex::PlexAuthState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -11,6 +15,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(PlexAuthState::default())
+        .manage(Arc::new(DownloadManager::default()))
         .invoke_handler(tauri::generate_handler![
             // Plex auth & library
             plex_start_pin_auth,
@@ -21,14 +26,27 @@ pub fn run() {
             plex_list_servers,
             plex_list_libraries,
             plex_list_books,
+            plex_get_book_detail,
             plex_get_playback,
             plex_get_stream,
             // Progress
             progress_get,
             progress_report,
-            // Downloads (stub)
+            progress_clear,
+            // Offline downloads
             download_list,
+            download_get,
             download_enqueue,
+            download_cancel,
+            download_remove,
+            download_remove_all,
+            download_storage_bytes,
+            download_local_playback,
+            // Cover art cache
+            cover_get_local,
+            cover_ensure,
+            cover_ensure_many,
+            cover_import,
         ])
         .run(tauri::generate_context!())
         .expect("error while running RogueAudio");

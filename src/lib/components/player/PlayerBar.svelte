@@ -1,51 +1,122 @@
 <script lang="ts">
+  import { goto } from "$app/navigation";
   import { player, formatTime, PLAYBACK_RATES } from "$lib/stores/player";
+  import { settings } from "$lib/stores/settings";
+  import { navBusy } from "$lib/stores/navBusy";
+  import { resolveChapterWindow } from "$lib/chapterProgress";
+  import { bookHref } from "$lib/nav";
   import SleepTimer from "./SleepTimer.svelte";
 
-  function onSeek(e: Event) {
-    const v = Number((e.target as HTMLInputElement).value);
-    void player.seek(v);
-  }
+  /** Transport only when a stream is ready and not mid-load */
+  const canControl = $derived($player.ready && !$player.loading);
+  const showPause = $derived($player.playing && !$player.loading);
+
+  const chapter = $derived(
+    resolveChapterWindow(
+      $player.chapters,
+      $player.positionSec * 1000,
+      $player.durationSec > 0 ? $player.durationSec * 1000 : null,
+    ),
+  );
+
+  /** Scrubber uses chapter window when markers exist, otherwise whole book. */
+  const scrubMax = $derived(
+    chapter ? Math.max(chapter.durationSec, 0.001) : Math.max($player.durationSec, 1),
+  );
+  const scrubValue = $derived(chapter ? chapter.positionSec : $player.positionSec);
+  const timeLeft = $derived(formatTime(chapter ? chapter.positionSec : $player.positionSec));
+  const timeRight = $derived(formatTime(chapter ? chapter.durationSec : $player.durationSec));
 
   const trackLabel = $derived.by(() => {
+    if (chapter) {
+      const n = $player.chapters.length;
+      return `Ch ${chapter.index + 1}/${n}`;
+    }
     const n = $player.tracks.length;
     if (n <= 1) return null;
     return `Track ${$player.trackIndex + 1}/${n}`;
   });
 
-  /** Transport only when a stream is ready and not mid-load */
-  const canControl = $derived($player.ready && !$player.loading);
-  const showPause = $derived($player.playing && !$player.loading);
+  const nowPlayingClass = $derived(
+    [
+      "flex min-w-0 flex-1 items-center gap-3 rounded-xl text-left transition",
+      $player.book
+        ? "cursor-pointer hover:bg-white/5 focus-visible:bg-white/5"
+        : "cursor-default",
+    ].join(" "),
+  );
+
+  function onSeek(e: Event) {
+    const v = Number((e.target as HTMLInputElement).value);
+    if (chapter) {
+      // Map chapter-relative scrub → book timeline
+      void player.seek(chapter.startSec + v);
+    } else {
+      void player.seek(v);
+    }
+  }
+
+  async function openBookView() {
+    if (!$player.book || !$player.serverId) return;
+    navBusy.start("Opening book…");
+    try {
+      await goto(bookHref($player.serverId, $player.book.ratingKey));
+    } finally {
+      navBusy.stop();
+    }
+  }
+
+  async function retryPlayback() {
+    if (!$player.book || !$player.serverId) return;
+    await player.loadBook($player.serverId, $player.book, {
+      autoplay: true,
+      ignoreResume: false,
+    });
+  }
 </script>
 
 <footer
-  class="shrink-0 border-t border-ra-border bg-ra-surface/95 backdrop-blur-md"
+  class="relative z-[200] shrink-0 border-t border-ra-border bg-ra-surface/95 backdrop-blur-md"
   aria-label="Player"
 >
   <div class="px-3 pt-2 sm:px-4">
+    {#if chapter}
+      <p class="mb-1 truncate text-[11px] text-ra-muted">
+        <span class="font-medium text-ra-text/80">Chapter</span>
+        <span class="text-ra-muted/50"> · </span>
+        <span class="text-ra-accent/90">{chapter.title}</span>
+      </p>
+    {/if}
     <input
       type="range"
       class="w-full"
       min="0"
-      max={Math.max($player.durationSec, 1)}
-      step="1"
-      value={$player.positionSec}
+      max={scrubMax}
+      step="0.25"
+      value={scrubValue}
       disabled={!canControl}
       oninput={onSeek}
-      aria-label="Seek"
+      aria-label={chapter ? "Seek within chapter" : "Seek"}
     />
     <div class="mt-0.5 flex justify-between text-[11px] tabular-nums text-ra-muted">
-      <span>{formatTime($player.positionSec)}</span>
-      <span>{formatTime($player.durationSec)}</span>
+      <span>{timeLeft}</span>
+      <span>{timeRight}</span>
     </div>
   </div>
 
   <div
     class="flex flex-wrap items-center gap-2 px-3 pb-3 pt-1 sm:flex-nowrap sm:gap-4 sm:px-4 sm:pb-3"
   >
-    <div class="flex min-w-0 flex-1 items-center gap-3">
+    <button
+      type="button"
+      class={nowPlayingClass}
+      disabled={!$player.book}
+      onclick={openBookView}
+      title={$player.book ? "Open book view" : undefined}
+      aria-label={$player.book ? `Open details for ${$player.book.title}` : "Nothing playing"}
+    >
       <div
-        class="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-ra-surface-2 text-xl"
+        class="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-ra-surface-2 text-xl ring-1 ring-white/5"
       >
         {#if $player.book?.thumb}
           <img src={$player.book.thumb} alt="" class="h-full w-full object-cover" />
@@ -63,6 +134,8 @@
             {/if}
             {#if $player.loading}
               <span class="ml-1 text-ra-accent">loading…</span>
+            {:else}
+              <span class="ml-1 text-ra-muted/50">· details</span>
             {/if}
           </p>
         {:else}
@@ -70,7 +143,7 @@
           <p class="text-xs text-ra-muted/70">Pick a book from your library</p>
         {/if}
       </div>
-    </div>
+    </button>
 
     <div class="flex items-center justify-center gap-1 sm:gap-2">
       <button
@@ -131,11 +204,36 @@
         </select>
       </label>
       <SleepTimer />
+      <button
+        type="button"
+        class="btn-icon"
+        title="Hide player"
+        aria-label="Hide player"
+        onclick={() => settings.patch({ playerBarVisible: false })}
+      >
+        ▼
+      </button>
     </div>
   </div>
 
   {#if $player.error}
-    <p class="px-4 pb-2 text-xs text-ra-danger">{$player.error}</p>
+    <div class="flex items-center gap-3 px-4 pb-3">
+      <p class="min-w-0 flex-1 text-xs text-ra-danger">{$player.error}</p>
+      <button
+        type="button"
+        class="inline-flex min-h-9 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-ra-danger/40 bg-ra-danger/10 px-3 text-xs font-semibold text-ra-danger transition hover:bg-ra-danger/20 disabled:cursor-not-allowed disabled:opacity-60"
+        disabled={$player.loading || !$player.book}
+        aria-busy={$player.loading}
+        onclick={retryPlayback}
+      >
+        {#if $player.loading}
+          <span class="ra-spinner" aria-hidden="true"></span>
+          Retrying…
+        {:else}
+          Retry
+        {/if}
+      </button>
+    </div>
   {/if}
 </footer>
 
@@ -161,7 +259,7 @@
 
   .play-icon {
     display: inline-block;
-    margin-left: 2px; /* optical center triangle */
+    margin-left: 2px;
   }
 
   .pause-icon {

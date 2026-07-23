@@ -69,12 +69,39 @@ export interface PlaybackInfo {
   totalDurationMs?: number | null;
 }
 
+export interface BookChapter {
+  index: number;
+  title: string;
+  startMs: number;
+  endMs?: number | null;
+  /** embedded | track */
+  source: string;
+}
+
+export interface BookDetail {
+  ratingKey: string;
+  title: string;
+  author?: string | null;
+  summary?: string | null;
+  year?: number | null;
+  thumb?: string | null;
+  art?: string | null;
+  durationMs?: number | null;
+  libraryKey?: string | null;
+  studio?: string | null;
+  series?: string | null;
+  seriesIndex?: number | null;
+  chapters: BookChapter[];
+  trackCount: number;
+}
+
 export interface ProgressSnapshot {
   ratingKey: string;
   positionMs: number;
   durationMs?: number | null;
   updatedAt: string;
   source: "local" | "plex" | "merged";
+  trackIndex?: number | null;
 }
 
 export interface ProgressReport {
@@ -83,6 +110,7 @@ export interface ProgressReport {
   timeMs: number;
   durationMs?: number | null;
   speed: number;
+  trackIndex?: number | null;
 }
 
 export type SleepMode = "off" | "duration" | "end_of_chapter";
@@ -93,5 +121,12 @@ export interface SleepTimerState {
   minutes: number;
   /** Epoch ms when timer should fire (duration mode) */
   endsAt: number | null;
+  /**
+   * Book-timeline position (ms) where end-of-chapter sleep should stop.
+   * From Plex chapter endTimeOffset / next chapter start, not a wall-clock duration.
+   */
+  chapterEndMs: number | null;
+  /** Label of the chapter we're sleeping through (UI). */
+  chapterTitle: string | null;
   fadeSeconds: number;
 }

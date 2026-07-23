@@ -115,6 +115,42 @@ pub struct PlaybackInfo {
     pub total_duration_ms: Option<u64>,
 }
 
+/// Chapter or track segment within a book timeline (book-relative offsets).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BookChapter {
+    pub index: u32,
+    pub title: String,
+    pub start_ms: u64,
+    pub end_ms: Option<u64>,
+    /// "embedded" | "track"
+    pub source: String,
+}
+
+/// Full book detail for the dedicated book view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BookDetail {
+    pub rating_key: String,
+    pub title: String,
+    pub author: Option<String>,
+    pub summary: Option<String>,
+    pub year: Option<i32>,
+    pub thumb: Option<String>,
+    pub art: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub library_key: Option<String>,
+    pub studio: Option<String>,
+    /// Series / collection name when known (Plex Collection or similar).
+    #[serde(default)]
+    pub series: Option<String>,
+    /// Position within the series when known (album index, etc.).
+    #[serde(default)]
+    pub series_index: Option<u32>,
+    pub chapters: Vec<BookChapter>,
+    pub track_count: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProgressSnapshot {
@@ -123,6 +159,9 @@ pub struct ProgressSnapshot {
     pub duration_ms: Option<u64>,
     pub updated_at: String,
     pub source: ProgressSource,
+    /// Optional track index within multi-file books (best-effort).
+    #[serde(default)]
+    pub track_index: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,4 +181,6 @@ pub struct ProgressReport {
     pub time_ms: u64,
     pub duration_ms: Option<u64>,
     pub speed: f64,
+    #[serde(default)]
+    pub track_index: Option<u32>,
 }

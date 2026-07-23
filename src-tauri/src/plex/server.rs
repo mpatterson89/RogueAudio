@@ -297,7 +297,7 @@ fn map_album_metadata(
     })
 }
 
-fn absolute_media_url(base_uri: &str, path: &str, token: &str) -> String {
+pub(crate) fn absolute_media_url(base_uri: &str, path: &str, token: &str) -> String {
     if path.starts_with("http://") || path.starts_with("https://") {
         if path.contains("X-Plex-Token=") {
             return path.to_string();

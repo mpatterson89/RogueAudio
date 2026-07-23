@@ -1,56 +1,43 @@
 //! Resolve Plex album/track metadata into playable stream URLs.
 //!
-//! WebKit rejects many direct .m4b URLs because Plex serves them as
-//! `application/octet-stream` (HTMLMediaElement error code 4). We therefore
-//! use the Plex universal transcoder to deliver progressive `audio/mpeg`.
+//! WebKit rejects many *remote* .m4b URLs because Plex serves them as
+//! `application/octet-stream` (HTMLMediaElement error code 4). Online playback
+//! therefore uses the Plex universal transcoder → progressive `audio/mpeg`.
+//!
+//! Offline downloads use the **original** part files (m4b/m4a/mp3/…) so size
+//! and quality match the library.
 
 use super::client::client_identifier;
 use super::models::{PlaybackInfo, PlaybackTrack};
 use super::server::{connect, ServerSession};
 use crate::error::{AppError, AppResult};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// One original media part suitable for offline download (not a transcoder URL).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadablePart {
+    pub rating_key: String,
+    pub title: String,
+    pub index: u32,
+    pub duration_ms: Option<u64>,
+    /// Declared size from Plex Part.size when present.
+    pub size_bytes: Option<u64>,
+    /// Plex container label (m4b, mp3, …).
+    pub container: String,
+    /// File extension to use on disk (m4b, mp3, …).
+    pub file_ext: String,
+    /// Fully-qualified original-file URL including token.
+    pub url: String,
+}
 
 /// Build a playable playlist for a book (album) or single track ratingKey.
 pub async fn get_playback(server_id: &str, rating_key: &str) -> AppResult<PlaybackInfo> {
     let session = connect(server_id).await?;
     let client_id = client_identifier()?;
     let meta = fetch_metadata(&session, rating_key).await?;
-
-    let meta_type = meta
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-
-    let track_nodes: Vec<Value> = match meta_type.as_str() {
-        "album" => {
-            let children = fetch_children(&session, rating_key).await?;
-            if children.is_empty() {
-                if has_playable_media(&meta) {
-                    vec![meta]
-                } else {
-                    return Err(AppError::Message(
-                        "album has no playable tracks".into(),
-                    ));
-                }
-            } else {
-                children
-            }
-        }
-        "track" | "episode" => vec![meta],
-        _ => {
-            let children = fetch_children(&session, rating_key).await.unwrap_or_default();
-            if !children.is_empty() {
-                children
-            } else if has_playable_media(&meta) {
-                vec![meta]
-            } else {
-                return Err(AppError::Message(format!(
-                    "unsupported media type '{meta_type}' for playback"
-                )));
-            }
-        }
-    };
+    let track_nodes = resolve_track_nodes(&session, rating_key, meta).await?;
 
     let mut tracks: Vec<PlaybackTrack> = Vec::new();
     for (i, node) in track_nodes.into_iter().enumerate() {
@@ -103,8 +90,17 @@ fn has_playable_media(meta: &Value) -> bool {
     extract_part_info(meta).is_some()
 }
 
-/// Returns (part_key, container, duration_ms)
-fn extract_part_info(meta: &Value) -> Option<(String, Option<String>, Option<u64>)> {
+struct PartInfo {
+    /// e.g. `/library/parts/123/0/file.m4b`
+    key: String,
+    container: Option<String>,
+    duration_ms: Option<u64>,
+    size_bytes: Option<u64>,
+    /// Original file name from Plex when present (`Something.m4b`).
+    file: Option<String>,
+}
+
+fn extract_part_info(meta: &Value) -> Option<PartInfo> {
     let media = meta.get("Media")?.as_array()?;
     for m in media {
         let parts = m.get("Part")?.as_array()?;
@@ -120,10 +116,119 @@ fn extract_part_info(meta: &Value) -> Option<(String, Option<String>, Option<u64
                 .and_then(|v| v.as_u64())
                 .or_else(|| m.get("duration").and_then(|v| v.as_u64()))
                 .or_else(|| meta.get("duration").and_then(|v| v.as_u64()));
-            return Some((key, container, duration));
+            let size_bytes = p.get("size").and_then(|v| v.as_u64());
+            let file = p
+                .get("file")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .filter(|s| !s.is_empty());
+            return Some(PartInfo {
+                key,
+                container,
+                duration_ms: duration,
+                size_bytes,
+                file,
+            });
         }
     }
     None
+}
+
+fn extension_for_part(part: &PartInfo) -> String {
+    // Prefer extension from the server path / file field (most accurate for m4b).
+    if let Some(file) = part.file.as_deref() {
+        if let Some(ext) = file.rsplit('.').next() {
+            let e = ext.to_ascii_lowercase();
+            if matches!(
+                e.as_str(),
+                "m4b" | "m4a" | "mp3" | "flac" | "ogg" | "opus" | "aac" | "wav" | "mp4" | "aiff" | "wma"
+            ) {
+                return e;
+            }
+        }
+    }
+    if let Some(ext) = part.key.rsplit('.').next() {
+        let e = ext.to_ascii_lowercase();
+        // key may end with `file.m4b` or just a number — only trust known audio ext
+        if matches!(
+            e.as_str(),
+            "m4b" | "m4a" | "mp3" | "flac" | "ogg" | "opus" | "aac" | "wav" | "mp4"
+        ) {
+            return e;
+        }
+    }
+    match part
+        .container
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "m4b" => "m4b".into(),
+        "mp3" | "mpeg" => "mp3".into(),
+        "flac" => "flac".into(),
+        "aac" | "m4a" => "m4a".into(),
+        "mp4" => "mp4".into(),
+        "ogg" | "vorbis" => "ogg".into(),
+        "opus" => "opus".into(),
+        other if !other.is_empty() => other.into(),
+        _ => "bin".into(),
+    }
+}
+
+/// Direct original-file download URL (no transcoder).
+fn original_part_url(base_uri: &str, part_key: &str, token: &str) -> String {
+    let base = base_uri.trim_end_matches('/');
+    let key = if part_key.starts_with('/') {
+        part_key.to_string()
+    } else {
+        format!("/{part_key}")
+    };
+    // download=1 asks PMS for the raw file bytes with a download disposition.
+    format!(
+        "{base}{key}?download=1&X-Plex-Token={}",
+        encode_component(token)
+    )
+}
+
+async fn resolve_track_nodes(
+    session: &ServerSession,
+    rating_key: &str,
+    meta: Value,
+) -> AppResult<Vec<Value>> {
+    let meta_type = meta
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    match meta_type.as_str() {
+        "album" => {
+            let children = fetch_children(session, rating_key).await?;
+            if children.is_empty() {
+                if has_playable_media(&meta) {
+                    Ok(vec![meta])
+                } else {
+                    Err(AppError::Message("album has no playable tracks".into()))
+                }
+            } else {
+                Ok(children)
+            }
+        }
+        "track" | "episode" => Ok(vec![meta]),
+        _ => {
+            let children = fetch_children(session, rating_key).await.unwrap_or_default();
+            if !children.is_empty() {
+                Ok(children)
+            } else if has_playable_media(&meta) {
+                Ok(vec![meta])
+            } else {
+                Err(AppError::Message(format!(
+                    "unsupported media type '{meta_type}' for playback"
+                )))
+            }
+        }
+    }
 }
 
 fn map_track(
@@ -132,7 +237,7 @@ fn map_track(
     client_id: &str,
     index: u32,
 ) -> Option<PlaybackTrack> {
-    let (_part_key, _container, part_duration) = extract_part_info(meta)?;
+    let part = extract_part_info(meta)?;
     let rating_key = meta
         .get("ratingKey")
         .and_then(|v| v.as_str())
@@ -146,9 +251,11 @@ fn map_track(
         .and_then(|v| v.as_str())
         .unwrap_or("Track")
         .to_string();
-    let duration_ms = part_duration.or_else(|| meta.get("duration").and_then(|v| v.as_u64()));
+    let duration_ms = part
+        .duration_ms
+        .or_else(|| meta.get("duration").and_then(|v| v.as_u64()));
 
-    // Transcode to progressive MP3 — correct Content-Type for WebKit / HTML5 audio.
+    // Online: transcode to progressive MP3 — correct Content-Type for WebKit.
     let url = transcode_mp3_url(
         &session.base_uri,
         &rating_key,
@@ -164,6 +271,71 @@ fn map_track(
         url,
         container: Some("mp3".into()),
     })
+}
+
+fn map_downloadable_part(
+    meta: &Value,
+    session: &ServerSession,
+    index: u32,
+) -> Option<DownloadablePart> {
+    let part = extract_part_info(meta)?;
+    let rating_key = meta
+        .get("ratingKey")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if rating_key.is_empty() {
+        return None;
+    }
+    let title = meta
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Track")
+        .to_string();
+    let duration_ms = part
+        .duration_ms
+        .or_else(|| meta.get("duration").and_then(|v| v.as_u64()));
+    let file_ext = extension_for_part(&part);
+    let container = part
+        .container
+        .clone()
+        .unwrap_or_else(|| file_ext.clone());
+    let url = original_part_url(&session.base_uri, &part.key, &session.token);
+
+    Some(DownloadablePart {
+        rating_key,
+        title,
+        index,
+        duration_ms,
+        size_bytes: part.size_bytes,
+        container,
+        file_ext,
+        url,
+    })
+}
+
+/// Original library files for offline download (m4b/mp3/… — not transcoded).
+pub async fn get_downloadable_parts(
+    server_id: &str,
+    rating_key: &str,
+) -> AppResult<Vec<DownloadablePart>> {
+    let session = connect(server_id).await?;
+    let meta = fetch_metadata(&session, rating_key).await?;
+    let track_nodes = resolve_track_nodes(&session, rating_key, meta).await?;
+
+    let mut parts: Vec<DownloadablePart> = Vec::new();
+    for (i, node) in track_nodes.into_iter().enumerate() {
+        if let Some(p) = map_downloadable_part(&node, &session, i as u32) {
+            parts.push(p);
+        }
+    }
+
+    if parts.is_empty() {
+        return Err(AppError::Message(
+            "no original media parts found for download".into(),
+        ));
+    }
+    Ok(parts)
 }
 
 /// Universal transcoder → progressive MP3 (verified against PMS).
