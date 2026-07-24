@@ -3,13 +3,18 @@
   import { auth } from "$lib/stores/auth";
   import { settings } from "$lib/stores/settings";
   import { player } from "$lib/stores/player";
+  import { downloads, queueItems } from "$lib/stores/downloads";
 
   const links = [
     { href: "/", label: "Library", icon: "📚" },
     { href: "/collections", label: "Collections", icon: "🗂️" },
+    { href: "/downloads", label: "Downloads", icon: "⬇️" },
     { href: "/auth", label: "Plex", icon: "🔗" },
     { href: "/settings", label: "Settings", icon: "⚙️" },
   ];
+
+  const queueCount = $derived($queueItems.length);
+  const queuePaused = $derived($downloads.queue.paused);
 </script>
 
 <aside
@@ -38,13 +43,27 @@
             $page.url.pathname.startsWith(link.href + "/")}
       <a
         href={link.href}
-        class={active
-          ? "flex min-h-11 items-center gap-3 rounded-xl bg-ra-accent-soft px-3 text-sm font-medium text-ra-text transition-colors"
-          : "flex min-h-11 items-center gap-3 rounded-xl px-3 text-sm font-medium text-ra-muted transition-colors hover:bg-ra-surface-2 hover:text-ra-text"}
+        class={active ? "flex min-h-11 items-center gap-3 rounded-xl bg-ra-accent-soft px-3 text-sm font-medium text-ra-text transition-colors" : "flex min-h-11 items-center gap-3 rounded-xl px-3 text-sm font-medium text-ra-muted transition-colors hover:bg-ra-surface-2 hover:text-ra-text"}
         aria-current={active ? "page" : undefined}
       >
         <span class="text-base" aria-hidden="true">{link.icon}</span>
-        <span class="hidden sm:inline">{link.label}</span>
+        <span class="hidden min-w-0 flex-1 sm:inline">{link.label}</span>
+        {#if link.href === "/downloads" && queueCount > 0}
+          <span
+            class="hidden rounded-full px-1.5 py-0.5 text-[10px] font-semibold tabular-nums sm:inline {queuePaused
+              ? 'bg-ra-accent-soft text-ra-accent'
+              : 'bg-ra-accent text-white'}"
+            title={queuePaused ? "Queue paused" : "In download queue"}
+          >
+            {queueCount}
+          </span>
+          <span
+            class="inline rounded-full bg-ra-accent px-1 text-[10px] font-semibold text-white sm:hidden"
+            aria-hidden="true"
+          >
+            {queueCount}
+          </span>
+        {/if}
       </a>
     {/each}
   </nav>
@@ -86,38 +105,3 @@
   </div>
 </aside>
 
-<style>
-  .eq-nav {
-    display: flex;
-    align-items: flex-end;
-    gap: 2px;
-    height: 12px;
-  }
-  .eq-nav i {
-    display: block;
-    width: 2.5px;
-    border-radius: 1px;
-    background: var(--color-ra-accent);
-    animation: ra-eq 0.9s ease-in-out infinite;
-  }
-  .eq-nav i:nth-child(1) {
-    height: 40%;
-  }
-  .eq-nav i:nth-child(2) {
-    height: 80%;
-    animation-delay: 0.15s;
-  }
-  .eq-nav i:nth-child(3) {
-    height: 55%;
-    animation-delay: 0.3s;
-  }
-  @keyframes ra-eq {
-    0%,
-    100% {
-      transform: scaleY(0.45);
-    }
-    50% {
-      transform: scaleY(1);
-    }
-  }
-</style>

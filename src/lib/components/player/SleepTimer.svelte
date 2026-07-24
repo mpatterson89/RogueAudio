@@ -116,9 +116,7 @@
 <div class="relative">
   <button
     type="button"
-    class={$player.sleep.mode !== "off"
-      ? "inline-flex min-h-10 min-w-10 items-center justify-center gap-1.5 rounded-lg border border-ra-accent bg-ra-surface-2 px-2.5 text-sm leading-none text-ra-accent"
-      : "inline-flex min-h-10 min-w-10 items-center justify-center gap-1.5 rounded-lg border border-ra-border bg-ra-surface-2 px-2.5 text-sm leading-none text-ra-text"}
+    class={$player.sleep.mode !== "off" ? "inline-flex min-h-10 min-w-10 items-center justify-center gap-1.5 rounded-lg border border-ra-accent bg-ra-surface-2 px-2.5 text-sm leading-none text-ra-accent" : "inline-flex min-h-10 min-w-10 items-center justify-center gap-1.5 rounded-lg border border-ra-border bg-ra-surface-2 px-2.5 text-sm leading-none text-ra-text"}
     onclick={openMenu}
     aria-expanded={open}
     aria-haspopup="true"

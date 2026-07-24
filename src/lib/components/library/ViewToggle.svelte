@@ -17,9 +17,7 @@
 >
   <button
     type="button"
-    class={value === "books"
-      ? "min-h-9 rounded-md bg-ra-accent-soft px-3 text-sm font-medium text-ra-text"
-      : "min-h-9 rounded-md px-3 text-sm font-medium text-ra-muted hover:text-ra-text"}
+    class={value === "books" ? "min-h-9 rounded-md bg-ra-accent-soft px-3 text-sm font-medium text-ra-text" : "min-h-9 rounded-md px-3 text-sm font-medium text-ra-muted hover:text-ra-text"}
     aria-pressed={value === "books"}
     onclick={() => onchange?.("books")}
   >
@@ -27,9 +25,7 @@
   </button>
   <button
     type="button"
-    class={value === "authors"
-      ? "min-h-9 rounded-md bg-ra-accent-soft px-3 text-sm font-medium text-ra-text"
-      : "min-h-9 rounded-md px-3 text-sm font-medium text-ra-muted hover:text-ra-text"}
+    class={value === "authors" ? "min-h-9 rounded-md bg-ra-accent-soft px-3 text-sm font-medium text-ra-text" : "min-h-9 rounded-md px-3 text-sm font-medium text-ra-muted hover:text-ra-text"}
     aria-pressed={value === "authors"}
     onclick={() => onchange?.("authors")}
   >

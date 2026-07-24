@@ -8,6 +8,7 @@
     downloadsByKey,
     isDownloadActive,
     isDownloadComplete,
+    isInDownloadQueue,
     formatBytes,
   } from "$lib/stores/downloads";
   import {
@@ -45,6 +46,10 @@
   const downloading = $derived(
     downloadPending || isDownloadActive(downloadItem),
   );
+  const inQueue = $derived(
+    downloadPending || isInDownloadQueue(downloadItem),
+  );
+  const downloadPaused = $derived(downloadItem?.status === "paused");
   const downloaded = $derived(isDownloadComplete(downloadItem));
   const downloadPct = $derived(
     Math.round(Math.min(100, Math.max(0, (downloadItem?.progress ?? 0) * 100))),
@@ -460,18 +465,12 @@
                 role="switch"
                 aria-checked={syncOn}
                 disabled={syncBusy}
-                class={syncOn
-                  ? "sync-toggle relative w-9 shrink-0 rounded-full bg-ra-accent p-0 transition disabled:opacity-60"
-                  : "sync-toggle relative w-9 shrink-0 rounded-full bg-white/15 p-0 transition disabled:opacity-60"}
+                class={syncOn ? "sync-toggle relative w-9 shrink-0 rounded-full bg-ra-accent p-0 transition disabled:opacity-60" : "sync-toggle relative w-9 shrink-0 rounded-full bg-white/15 p-0 transition disabled:opacity-60"}
                 onclick={toggleContinueElsewhere}
-                title={syncOn
-                  ? "Turn off Plex position sync"
-                  : "Sync position with Plex and Plexamp"}
+                title={syncOn ? "Turn off Plex position sync" : "Sync position with Plex and Plexamp"}
               >
                 <span
-                  class={syncOn
-                    ? "sync-toggle-knob absolute left-[1.125rem] top-0.5 rounded-full bg-white shadow transition"
-                    : "sync-toggle-knob absolute left-0.5 top-0.5 rounded-full bg-white/90 shadow transition"}
+                  class={syncOn ? "sync-toggle-knob absolute left-[1.125rem] top-0.5 rounded-full bg-white shadow transition" : "sync-toggle-knob absolute left-0.5 top-0.5 rounded-full bg-white/90 shadow transition"}
                   aria-hidden="true"
                 ></span>
               </button>
@@ -547,16 +546,33 @@
               >
                 ✓ Downloaded
               </button>
-            {:else if downloading}
+            {:else if inQueue}
+              <a
+                href="/downloads"
+                class="btn-secondary min-w-[9.5rem] inline-flex items-center justify-center gap-1.5"
+                title="Open download queue"
+              >
+                {#if downloading && !downloadPaused}
+                  <span class="ra-spinner" aria-hidden="true"></span>
+                {/if}
+                {#if downloadPaused}
+                  Paused · {downloadPct}%
+                {:else if downloadItem?.status === "error"}
+                  Error · Retry in queue
+                {:else if downloading}
+                  {downloadPct}% · Queue
+                {:else}
+                  Queued
+                {/if}
+              </a>
               <button
                 type="button"
-                class="btn-secondary min-w-[9.5rem]"
+                class="btn-secondary"
                 disabled={downloadBusy}
                 onclick={cancelDownload}
                 title="Cancel download"
               >
-                <span class="ra-spinner" aria-hidden="true"></span>
-                {downloadPct}% · Cancel
+                Cancel
               </button>
             {:else}
               <button
@@ -582,7 +598,7 @@
             </div>
           </div>
 
-          {#if downloading && downloadItem}
+          {#if inQueue && downloadItem}
             <div class="space-y-1.5">
               <div class="h-1.5 overflow-hidden rounded-full bg-white/10">
                 <div
@@ -591,7 +607,13 @@
                 ></div>
               </div>
               <p class="text-[11px] text-ra-muted/80">
-                {#if (downloadItem.trackCount ?? 0) > 1}
+                {#if downloadPaused}
+                  Queue paused
+                {:else if downloadItem.status === "queued"}
+                  Waiting in queue
+                {:else if downloadItem.status === "error"}
+                  Failed — resume from Downloads
+                {:else if (downloadItem.trackCount ?? 0) > 1}
                   Whole book · part {Math.min(downloadItem.tracksDone + 1, downloadItem.trackCount)}
                   of {downloadItem.trackCount}
                 {:else}
@@ -602,6 +624,7 @@
                     {" "}/ ~{formatBytes(downloadItem.bytesTotal)}{/if}
                 {/if}
                 · {downloadPct}%
+                · <a href="/downloads" class="text-ra-accent hover:underline">Downloads</a>
               </p>
             </div>
           {:else if downloaded && downloadItem}
@@ -639,9 +662,7 @@
             Summary
           </h2>
           <p
-            class={summaryExpanded
-              ? "text-sm leading-relaxed text-ra-text/90 sm:text-[15px]"
-              : "line-clamp-5 text-sm leading-relaxed text-ra-text/90 sm:text-[15px]"}
+            class={summaryExpanded ? "text-sm leading-relaxed text-ra-text/90 sm:text-[15px]" : "line-clamp-5 text-sm leading-relaxed text-ra-text/90 sm:text-[15px]"}
           >
             {detail.summary}
           </p>
@@ -692,23 +713,17 @@
               <li>
                 <button
                   type="button"
-                  class={active
-                    ? "group flex w-full items-center gap-3 rounded-xl bg-ra-accent-soft px-3 py-2.5 text-left ring-1 ring-ra-accent/40 transition"
-                    : "group flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition hover:bg-white/5"}
+                  class={active ? "group flex w-full items-center gap-3 rounded-xl bg-ra-accent-soft px-3 py-2.5 text-left ring-1 ring-ra-accent/40 transition" : "group flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition hover:bg-white/5"}
                   onclick={() => seekChapter(ch)}
                 >
                   <span
-                    class={active
-                      ? "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-ra-accent text-xs font-semibold tabular-nums text-white"
-                      : "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-white/5 text-xs font-semibold tabular-nums text-ra-muted"}
+                    class={active ? "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-ra-accent text-xs font-semibold tabular-nums text-white" : "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-white/5 text-xs font-semibold tabular-nums text-ra-muted"}
                   >
                     {i + 1}
                   </span>
                   <span class="min-w-0 flex-1">
                     <span
-                      class={active
-                        ? "block truncate text-sm font-medium text-ra-text"
-                        : "block truncate text-sm font-medium text-ra-text/90"}
+                      class={active ? "block truncate text-sm font-medium text-ra-text" : "block truncate text-sm font-medium text-ra-text/90"}
                     >
                       {ch.title}
                     </span>
@@ -743,130 +758,3 @@
   </div>
 {/if}
 
-<style>
-  .glass {
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    background: linear-gradient(
-      145deg,
-      rgba(20, 22, 28, 0.72),
-      rgba(12, 13, 16, 0.55)
-    );
-    box-shadow:
-      0 20px 50px rgba(0, 0, 0, 0.35),
-      inset 0 1px 0 rgba(255, 255, 255, 0.04);
-    backdrop-filter: blur(18px);
-  }
-
-  .cover-shadow {
-    box-shadow:
-      0 25px 50px -12px rgba(0, 0, 0, 0.65),
-      0 0 0 1px rgba(255, 255, 255, 0.06);
-  }
-
-  .chip {
-    border-radius: 999px;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    background: rgba(0, 0, 0, 0.25);
-    padding: 0.35rem 0.7rem;
-  }
-
-  .btn-primary {
-    display: inline-flex;
-    min-height: 48px;
-    align-items: center;
-    justify-content: center;
-    gap: 0.5rem;
-    border-radius: 999px;
-    background: var(--color-ra-accent);
-    padding: 0 1.4rem;
-    font-size: 0.9rem;
-    font-weight: 600;
-    color: white;
-    transition: background 0.15s ease;
-  }
-  .btn-primary:hover {
-    background: var(--color-ra-accent-hover);
-  }
-
-  .btn-secondary {
-    display: inline-flex;
-    min-height: 48px;
-    align-items: center;
-    justify-content: center;
-    gap: 0.45rem;
-    border-radius: 999px;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    background: rgba(0, 0, 0, 0.25);
-    padding: 0 1rem;
-    font-size: 0.85rem;
-    font-weight: 600;
-    color: var(--color-ra-text);
-  }
-  .btn-secondary:hover {
-    border-color: var(--color-ra-accent);
-  }
-  .btn-secondary:disabled {
-    opacity: 0.65;
-  }
-
-  .btn-ghost {
-    min-height: 40px;
-    border-radius: 999px;
-    border: 1px solid transparent;
-    background: rgba(0, 0, 0, 0.2);
-    padding: 0 0.9rem;
-    font-size: 0.85rem;
-    color: var(--color-ra-muted);
-  }
-  .btn-ghost:hover {
-    border-color: rgba(255, 255, 255, 0.1);
-    color: var(--color-ra-text);
-  }
-
-  /* Override global button min-height: 44px so the switch isn't a tall oval */
-  .sync-toggle {
-    height: 1.25rem; /* 20px */
-    min-height: 0 !important;
-    width: 2.25rem; /* 36px */
-  }
-  .sync-toggle-knob {
-    height: 1rem;
-    width: 1rem;
-  }
-
-  .eq {
-    display: flex;
-    align-items: flex-end;
-    gap: 2px;
-    height: 14px;
-  }
-  .eq i {
-    display: block;
-    width: 3px;
-    border-radius: 1px;
-    background: var(--color-ra-accent);
-    animation: ra-eq 0.9s ease-in-out infinite;
-  }
-  .eq i:nth-child(1) {
-    height: 40%;
-    animation-delay: 0s;
-  }
-  .eq i:nth-child(2) {
-    height: 80%;
-    animation-delay: 0.15s;
-  }
-  .eq i:nth-child(3) {
-    height: 55%;
-    animation-delay: 0.3s;
-  }
-
-  @keyframes ra-eq {
-    0%,
-    100% {
-      transform: scaleY(0.45);
-    }
-    50% {
-      transform: scaleY(1);
-    }
-  }
-</style>

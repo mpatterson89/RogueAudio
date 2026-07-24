@@ -150,9 +150,17 @@
             · <span class="tabular-nums text-ra-text">{formatBytes(totalBytes)}</span>
             total
           {/if}
+          · manage the active queue on
+          <a href="/downloads" class="text-ra-accent hover:underline">Downloads</a>
         </p>
       </div>
       <div class="flex flex-wrap items-center gap-2">
+        <a
+          href="/downloads"
+          class="inline-flex min-h-10 items-center rounded-lg border border-ra-border px-3 text-sm text-ra-muted hover:border-ra-accent hover:text-ra-text"
+        >
+          Queue
+        </a>
         <button
           type="button"
           class="min-h-10 rounded-lg border border-ra-border px-3 text-sm text-ra-muted hover:border-ra-accent hover:text-ra-text disabled:opacity-50"

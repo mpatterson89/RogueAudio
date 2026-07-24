@@ -20,7 +20,7 @@
       }
     ],
     "security": {
-      "csp": null,
+      "csp": "default-src 'self' ipc: http://ipc.localhost; connect-src ipc: http://ipc.localhost http://127.0.0.1:* http://localhost:* https: http: ws: wss:; img-src 'self' asset: http://asset.localhost https: http: data: blob:; media-src 'self' asset: http://asset.localhost http://127.0.0.1:* http://localhost:* https: http: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'",
       "assetProtocol": {
         "enable": true,
         "scope": [

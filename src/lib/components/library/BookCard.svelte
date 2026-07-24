@@ -27,11 +27,12 @@
       "Unknown author",
   );
 
-  // overflow-visible so the ⋮ dropdown isn't clipped; image area clips cover art
+  // overflow-visible so the ⋮ dropdown isn't clipped; image area clips cover art.
+  // Only animate border/background (not z-index) so scrubbing the grid stays snappy.
   const cardClass = $derived(
     selected
-      ? "book-card group relative z-0 flex w-full flex-col overflow-visible rounded-2xl border border-ra-accent bg-ra-surface text-left ring-1 ring-ra-accent/40 transition hover:z-30 hover:border-ra-accent/50 hover:bg-ra-surface-2 focus-within:z-30 focus-within:border-ra-accent"
-      : "book-card group relative z-0 flex w-full flex-col overflow-visible rounded-2xl border border-ra-border bg-ra-surface text-left transition hover:z-30 hover:border-ra-accent/50 hover:bg-ra-surface-2 focus-within:z-30 focus-within:border-ra-accent",
+      ? "book-card group relative z-0 flex w-full flex-col overflow-visible rounded-2xl border border-ra-accent bg-ra-surface text-left ring-1 ring-ra-accent/40 transition-[border-color,background-color] duration-75 ease-out hover:border-ra-accent/50 hover:bg-ra-surface-2 focus-within:border-ra-accent"
+      : "book-card group relative z-0 flex w-full flex-col overflow-visible rounded-2xl border border-ra-border bg-ra-surface text-left transition-[border-color,background-color] duration-75 ease-out hover:border-ra-accent/50 hover:bg-ra-surface-2 focus-within:border-ra-accent",
   );
 </script>
 
@@ -62,22 +63,13 @@
     </div>
   </button>
 
-  {#if showMenu && onaddToCollection}
+  {#if showMenu}
     <!-- Only visible when this card is hovered / focused / menu open -->
     <div
-      class="book-card-menu absolute right-2 top-2 z-20 opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100 has-[[aria-expanded=true]]:opacity-100"
+      class="book-card-menu absolute right-2 top-2 z-20 opacity-0 transition-opacity duration-75 ease-out group-hover:opacity-100 group-focus-within:opacity-100 has-[.book-menu-btn[aria-expanded=true]]:opacity-100"
     >
       <BookMenu {book} {onaddToCollection} />
     </div>
   {/if}
 </div>
 
-<style>
-  /* Keep ⋮ + menu visible while open; raise card above grid siblings */
-  .book-card:has(.book-menu-btn[aria-expanded="true"]) {
-    z-index: 40;
-  }
-  .book-card:has(.book-menu-btn[aria-expanded="true"]) .book-card-menu {
-    opacity: 1;
-  }
-</style>

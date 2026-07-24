@@ -2,6 +2,7 @@ mod commands;
 mod covers;
 mod downloads;
 mod error;
+mod media_server;
 mod plex;
 mod storage;
 mod user_collections;
@@ -17,6 +18,13 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(PlexAuthState::default())
         .manage(Arc::new(DownloadManager::default()))
+        .setup(|_app| {
+            // Local HTTP media server for offline HTML5 playback (Range + MIME)
+            if let Err(e) = media_server::start() {
+                eprintln!("media server failed to start: {e}");
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             // Plex auth & library
             plex_start_pin_auth,
@@ -45,10 +53,16 @@ pub fn run() {
             download_get,
             download_enqueue,
             download_cancel,
+            download_pause_queue,
+            download_resume_queue,
+            download_queue_state,
+            download_restore,
             download_remove,
             download_remove_all,
             download_storage_bytes,
             download_local_playback,
+            download_playable_ready,
+            download_ensure_playable,
             // Cover art cache
             cover_get_local,
             cover_ensure,

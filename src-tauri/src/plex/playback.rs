@@ -136,8 +136,13 @@ fn extract_part_info(meta: &Value) -> Option<PartInfo> {
 
 fn extension_for_part(part: &PartInfo) -> String {
     // Prefer extension from the server path / file field (most accurate for m4b).
+    // Windows paths: take the last path segment first so `G:\books\Title.m4b` works.
     if let Some(file) = part.file.as_deref() {
-        if let Some(ext) = file.rsplit('.').next() {
+        let base = file
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(file);
+        if let Some(ext) = base.rsplit('.').next() {
             let e = ext.to_ascii_lowercase();
             if matches!(
                 e.as_str(),
@@ -167,8 +172,9 @@ fn extension_for_part(part: &PartInfo) -> String {
         "m4b" => "m4b".into(),
         "mp3" | "mpeg" => "mp3".into(),
         "flac" => "flac".into(),
+        // Plex often labels AAC audiobooks as container "mp4"; prefer m4a for WebKit
         "aac" | "m4a" => "m4a".into(),
-        "mp4" => "mp4".into(),
+        "mp4" => "m4a".into(),
         "ogg" | "vorbis" => "ogg".into(),
         "opus" => "opus".into(),
         other if !other.is_empty() => other.into(),

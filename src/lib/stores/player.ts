@@ -142,12 +142,14 @@ function withQuery(url: string, patch: Record<string, string | null>): string {
   return `${base}?${out}`;
 }
 
-/** Local offline files (asset protocol / absolute paths converted for webview). */
+/** Local offline files (media server / asset protocol / absolute paths). */
 function isLocalStream(url: string): boolean {
   return (
     url.startsWith("asset:") ||
     url.includes("asset.localhost") ||
     url.startsWith("file:") ||
+    url.includes("127.0.0.1") ||
+    url.startsWith("http://localhost") ||
     url.startsWith("/") // absolute path before convertFileSrc (shouldn't reach engine)
   );
 }
@@ -177,11 +179,13 @@ function toPlayableUrl(pathOrUrl: string): string {
     pathOrUrl.startsWith("https://") ||
     pathOrUrl.startsWith("asset:") ||
     pathOrUrl.startsWith("file:") ||
-    pathOrUrl.includes("asset.localhost")
+    pathOrUrl.includes("asset.localhost") ||
+    pathOrUrl.includes("127.0.0.1")
   ) {
+    // Local media server (http://127.0.0.1:port/d/…) or remote stream
     return pathOrUrl;
   }
-  // Absolute filesystem path from download_local_playback
+  // Absolute filesystem path fallback → asset protocol
   try {
     return convertFileSrc(pathOrUrl);
   } catch {
@@ -578,7 +582,38 @@ function createPlayerStore() {
       let totalDurationMs: number | null | undefined;
       let chapters: BookChapter[] = [];
 
-      const local = await downloadsApi.localPlayback(book.ratingKey).catch(() => null);
+      // Offline: prefer local files. AAC/M4B need an MP3 sidecar (ffmpeg) for WebKit.
+      let local = await downloadsApi.localPlayback(book.ratingKey).catch(() => null);
+      if (local?.playback?.tracks?.length) {
+        const ready = await downloadsApi
+          .playableReady(book.ratingKey)
+          .catch(() => false);
+        if (!ready) {
+          // AAC/M4B must be converted to MP3 for WebKit — can take several minutes
+          update((s) => ({
+            ...s,
+            error: "Preparing offline audio for playback (one-time)…",
+            loading: true,
+          }));
+          try {
+            await downloadsApi.ensurePlayable(book.ratingKey);
+            local =
+              (await downloadsApi.localPlayback(book.ratingKey).catch(() => null)) ??
+              local;
+            update((s) => ({ ...s, error: null }));
+          } catch (prepErr) {
+            console.warn("ensurePlayable failed", prepErr);
+            update((s) => ({
+              ...s,
+              error:
+                prepErr instanceof Error
+                  ? `Could not prepare offline audio: ${prepErr.message}`
+                  : String(prepErr),
+            }));
+            // Still try local path (media server + m4a) if prepare failed
+          }
+        }
+      }
 
       if (local?.playback?.tracks?.length) {
         tracks = local.playback.tracks.map((t) => ({

@@ -38,12 +38,9 @@
   });
 
   const nowPlayingClass = $derived(
-    [
-      "flex min-w-0 flex-1 items-center gap-3 rounded-xl text-left transition",
-      $player.book
-        ? "cursor-pointer hover:bg-white/5 focus-visible:bg-white/5"
-        : "cursor-default",
-    ].join(" "),
+    $player.book
+      ? "flex min-w-0 flex-1 items-center gap-3 rounded-xl text-left transition cursor-pointer hover:bg-white/5 focus-visible:bg-white/5"
+      : "flex min-w-0 flex-1 items-center gap-3 rounded-xl text-left transition cursor-default",
   );
 
   function onSeek(e: Event) {
@@ -148,7 +145,7 @@
     <div class="flex items-center justify-center gap-1 sm:gap-2">
       <button
         type="button"
-        class="btn-icon"
+        class="ra-btn-icon"
         disabled={!canControl}
         onclick={() => player.skip(-30)}
         aria-label="Back 30 seconds"
@@ -167,18 +164,18 @@
         title={$player.loading ? "Loading…" : showPause ? "Pause" : "Play"}
       >
         {#if $player.loading}
-          <span class="spinner" aria-hidden="true"></span>
+          <span class="ra-player-spinner" aria-hidden="true"></span>
           <span class="sr-only">Loading</span>
         {:else if showPause}
-          <span aria-hidden="true" class="pause-icon">❚❚</span>
+          <span aria-hidden="true" class="ra-pause-icon">❚❚</span>
         {:else}
-          <span aria-hidden="true" class="play-icon">▶</span>
+          <span aria-hidden="true" class="ra-play-icon">▶</span>
         {/if}
       </button>
 
       <button
         type="button"
-        class="btn-icon"
+        class="ra-btn-icon"
         disabled={!canControl}
         onclick={() => player.skip(30)}
         aria-label="Forward 30 seconds"
@@ -206,7 +203,7 @@
       <SleepTimer />
       <button
         type="button"
-        class="btn-icon"
+        class="ra-btn-icon"
         title="Hide player"
         aria-label="Hide player"
         onclick={() => settings.patch({ playerBarVisible: false })}
@@ -237,60 +234,3 @@
   {/if}
 </footer>
 
-<style>
-  .btn-icon {
-    min-height: 44px;
-    min-width: 44px;
-    border-radius: 0.75rem;
-    border: 1px solid var(--color-ra-border);
-    background: var(--color-ra-surface-2);
-    padding: 0 0.5rem;
-    font-size: 0.75rem;
-    font-weight: 600;
-    color: var(--color-ra-text);
-  }
-  .btn-icon:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }
-  .btn-icon:hover:not(:disabled) {
-    border-color: var(--color-ra-accent);
-  }
-
-  .play-icon {
-    display: inline-block;
-    margin-left: 2px;
-  }
-
-  .pause-icon {
-    letter-spacing: -0.05em;
-    font-size: 0.85em;
-  }
-
-  .spinner {
-    width: 1.35rem;
-    height: 1.35rem;
-    border: 2.5px solid rgba(255, 255, 255, 0.35);
-    border-top-color: #fff;
-    border-radius: 999px;
-    animation: ra-spin 0.7s linear infinite;
-  }
-
-  @keyframes ra-spin {
-    to {
-      transform: rotate(360deg);
-    }
-  }
-
-  .sr-only {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    margin: -1px;
-    overflow: hidden;
-    clip: rect(0, 0, 0, 0);
-    white-space: nowrap;
-    border: 0;
-  }
-</style>

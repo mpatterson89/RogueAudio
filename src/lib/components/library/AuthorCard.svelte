@@ -12,7 +12,7 @@
 
 <button
   type="button"
-  class="group flex w-full flex-col overflow-hidden rounded-2xl border border-ra-border bg-ra-surface text-left transition hover:border-ra-accent/50 hover:bg-ra-surface-2 focus-visible:border-ra-accent"
+  class="group flex w-full flex-col overflow-hidden rounded-2xl border border-ra-border bg-ra-surface text-left transition-[border-color,background-color] duration-75 ease-out hover:border-ra-accent/50 hover:bg-ra-surface-2 focus-visible:border-ra-accent"
   {onclick}
 >
   <div

@@ -65,13 +65,25 @@ pub async fn get_book_detail(server_id: &str, rating_key: &str) -> AppResult<Boo
         .map(|s| s.to_string())
         .filter(|s| !s.is_empty());
 
-    // Series: first Collection tag, else none. Index: album `index` when > 0.
+    // Series: first Collection tag. Index: title "Book N", collection order, then album index.
     let series = extract_series_name(&album);
-    let series_index = album
-        .get("index")
-        .and_then(|v| v.as_u64())
-        .map(|n| n as u32)
-        .filter(|&n| n > 0);
+    let library_key_for_series = album
+        .get("librarySectionID")
+        .map(|v| match v {
+            Value::String(s) => s.clone(),
+            Value::Number(n) => n.to_string(),
+            _ => String::new(),
+        })
+        .filter(|s| !s.is_empty());
+    let series_index = extract_series_index(
+        &session,
+        &album,
+        &album_key,
+        &title,
+        series.as_deref(),
+        library_key_for_series.as_deref(),
+    )
+    .await;
 
     let duration_ms = album.get("duration").and_then(|v| v.as_u64());
 
@@ -152,6 +164,162 @@ fn extract_series_name(meta: &Value) -> Option<String> {
             if !t.is_empty() {
                 return Some(t.to_string());
             }
+        }
+    }
+    None
+}
+
+/// Plex album `index` is almost always 1 for standalone audiobook albums, so it is a
+/// weak signal. Prefer explicit "Book N" in the title, then position within the
+/// Plex collection (sorted by year), then album index only when it is > 1.
+async fn extract_series_index(
+    session: &ServerSession,
+    album: &Value,
+    album_key: &str,
+    title: &str,
+    series: Option<&str>,
+    library_key: Option<&str>,
+) -> Option<u32> {
+    if let Some(n) = parse_book_number_from_title(title) {
+        return Some(n);
+    }
+
+    if series.is_some() {
+        if let Some(n) =
+            series_index_from_collection(session, album, album_key, library_key).await
+        {
+            return Some(n);
+        }
+    }
+
+    album
+        .get("index")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32)
+        .filter(|&n| n > 1)
+}
+
+/// "Dungeons and Noobs: Noobtown, Book 4", "Noobtown #5", "Vol. 3", etc.
+fn parse_book_number_from_title(title: &str) -> Option<u32> {
+    let t = title.trim();
+    // Book 4 / book 04 / Book4
+    let book_re = regex_lite_book_n(t);
+    if book_re.is_some() {
+        return book_re;
+    }
+    // #4 or # 4 (avoid matching years)
+    if let Some(cap) = find_hash_number(t) {
+        return Some(cap);
+    }
+    // Vol. 3 / Volume 3
+    if let Some(cap) = find_vol_number(t) {
+        return Some(cap);
+    }
+    None
+}
+
+fn regex_lite_book_n(title: &str) -> Option<u32> {
+    let lower = title.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let needle = b"book";
+    let mut i = 0;
+    while i + needle.len() < bytes.len() {
+        if &bytes[i..i + needle.len()] == needle {
+            let after = &lower[i + needle.len()..];
+            let after = after.trim_start_matches(|c: char| c == ' ' || c == '.' || c == ':' || c == '-');
+            let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(n) = digits.parse::<u32>() {
+                if (1..=999).contains(&n) {
+                    return Some(n);
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn find_hash_number(title: &str) -> Option<u32> {
+    let bytes = title.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b != b'#' {
+            continue;
+        }
+        let rest = title[i + 1..].trim_start();
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(n) = digits.parse::<u32>() {
+            if (1..=999).contains(&n) {
+                return Some(n);
+            }
+        }
+    }
+    None
+}
+
+fn find_vol_number(title: &str) -> Option<u32> {
+    let lower = title.to_ascii_lowercase();
+    for needle in ["volume", "vol."] {
+        if let Some(pos) = lower.find(needle) {
+            let after = lower[pos + needle.len()..].trim_start_matches(|c: char| {
+                c == ' ' || c == '.' || c == ':' || c == '-'
+            });
+            let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(n) = digits.parse::<u32>() {
+                if (1..=999).contains(&n) {
+                    return Some(n);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Position (1-based) of this album in its Plex collection, sorted by year then title.
+async fn series_index_from_collection(
+    session: &ServerSession,
+    album: &Value,
+    album_key: &str,
+    library_key: Option<&str>,
+) -> Option<u32> {
+    let collection_id = album
+        .get("Collection")?
+        .as_array()?
+        .first()?
+        .get("id")
+        .and_then(|v| match v {
+            Value::Number(n) => n.as_u64().map(|u| u.to_string()),
+            Value::String(s) => Some(s.clone()),
+            _ => None,
+        })?;
+
+    let section = library_key
+        .map(|s| s.to_string())
+        .or_else(|| {
+            album
+                .get("librarySectionID")
+                .map(|v| match v {
+                    Value::String(s) => s.clone(),
+                    Value::Number(n) => n.to_string(),
+                    _ => String::new(),
+                })
+                .filter(|s| !s.is_empty())
+        })?;
+
+    // type=9 = album. sort=year matches publication order for most series.
+    let path = format!(
+        "/library/sections/{section}/all?type=9&collection={collection_id}&sort=year,titleSort"
+    );
+    let raw: Value = pms_get_json(&session.base_uri, &path, &session.token)
+        .await
+        .ok()?;
+    let items = raw
+        .pointer("/MediaContainer/Metadata")?
+        .as_array()?;
+
+    for (i, item) in items.iter().enumerate() {
+        let rk = item.get("ratingKey").and_then(|v| v.as_str()).unwrap_or("");
+        if rk == album_key {
+            return Some((i as u32) + 1);
         }
     }
     None

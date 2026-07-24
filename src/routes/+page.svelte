@@ -233,9 +233,7 @@
         <div class="flex flex-wrap items-center gap-2">
           <button
             type="button"
-            class={installedOnly
-              ? "inline-flex min-h-9 items-center rounded-lg border border-ra-accent bg-ra-accent-soft px-3 text-sm font-medium text-ra-text"
-              : "inline-flex min-h-9 items-center rounded-lg border border-ra-border bg-ra-surface px-3 text-sm font-medium text-ra-muted hover:text-ra-text"}
+            class={installedOnly ? "inline-flex min-h-9 items-center rounded-lg border border-ra-accent bg-ra-accent-soft px-3 text-sm font-medium text-ra-text" : "inline-flex min-h-9 items-center rounded-lg border border-ra-border bg-ra-surface px-3 text-sm font-medium text-ra-muted hover:text-ra-text"}
             aria-pressed={installedOnly}
             onclick={() => setInstalledOnly(!installedOnly)}
             title="Show only offline downloads"
