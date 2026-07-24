@@ -150,9 +150,17 @@
             · <span class="tabular-nums text-ra-text">{formatBytes(totalBytes)}</span>
             total
           {/if}
+          · manage the active queue on
+          <a href="/downloads" class="text-ra-accent hover:underline">Downloads</a>
         </p>
       </div>
       <div class="flex flex-wrap items-center gap-2">
+        <a
+          href="/downloads"
+          class="inline-flex min-h-10 items-center rounded-lg border border-ra-border px-3 text-sm text-ra-muted hover:border-ra-accent hover:text-ra-text"
+        >
+          Queue
+        </a>
         <button
           type="button"
           class="min-h-10 rounded-lg border border-ra-border px-3 text-sm text-ra-muted hover:border-ra-accent hover:text-ra-text disabled:opacity-50"
@@ -236,9 +244,17 @@
   </section>
 
   <section class="rounded-2xl border border-ra-border bg-ra-surface p-5 text-sm text-ra-muted">
+    <h2 class="mb-2 font-medium text-ra-text">Continue elsewhere</h2>
+    <p>
+      On each book’s page, turn on <span class="text-ra-text">Continue elsewhere</span> to
+      sync your listen position with Plex and Plexamp (and pull their position when
+      different). Off by default per title; local bookmarks always work.
+    </p>
+  </section>
+
+  <section class="rounded-2xl border border-ra-border bg-ra-surface p-5 text-sm text-ra-muted">
     <h2 class="mb-2 font-medium text-ra-text">Roadmap</h2>
     <ul class="list-inside list-disc space-y-1">
-      <li>Progress sync to Plex timeline</li>
       <li>MPRIS media keys</li>
       <li>Flatpak packaging for Steam Deck</li>
     </ul>

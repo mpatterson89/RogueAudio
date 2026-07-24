@@ -1,5 +1,8 @@
 import { writable } from "svelte/store";
 
+import type { LibraryViewMode } from "$lib/types/models";
+import type { AuthorSort, BookSort, CollectionSort } from "$lib/sort";
+
 export interface SettingsState {
   /** Reduce motion for accessibility */
   reduceMotion: boolean;
@@ -9,6 +12,13 @@ export interface SettingsState {
   skipSeconds: number;
   /** Whether the bottom player chrome is visible */
   playerBarVisible: boolean;
+  /** Books vs authors on library / collection detail */
+  libraryViewMode: LibraryViewMode;
+  /** Library shows only offline downloads when true */
+  libraryInstalledOnly: boolean;
+  bookSort: BookSort;
+  authorSort: AuthorSort;
+  collectionSort: CollectionSort;
 }
 
 const defaultSettings: SettingsState = {
@@ -16,6 +26,11 @@ const defaultSettings: SettingsState = {
   sleepFadeSeconds: 15,
   skipSeconds: 30,
   playerBarVisible: true,
+  libraryViewMode: "books",
+  libraryInstalledOnly: false,
+  bookSort: "title_asc",
+  authorSort: "name_asc",
+  collectionSort: "name_asc",
 };
 
 function load(): SettingsState {

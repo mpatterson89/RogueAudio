@@ -72,9 +72,7 @@
     aria-label={label ?? "Loading page"}
   >
     <div
-      class={reduceMotion
-        ? "h-0.5 w-full bg-ra-accent/80"
-        : "nav-progress-track h-0.5 w-full overflow-hidden bg-ra-accent/20"}
+      class={reduceMotion ? "h-0.5 w-full bg-ra-accent/80" : "nav-progress-track h-0.5 w-full overflow-hidden bg-ra-accent/20"}
     >
       {#if !reduceMotion}
         <div class="nav-progress-bar h-full w-1/3 rounded-full bg-ra-accent"></div>
@@ -100,19 +98,3 @@
   <span class="sr-only" aria-live="polite">{label ?? "Loading"}</span>
 {/if}
 
-<style>
-  .nav-progress-track {
-    position: relative;
-  }
-  .nav-progress-bar {
-    animation: nav-progress-slide 1s ease-in-out infinite;
-  }
-  @keyframes nav-progress-slide {
-    0% {
-      transform: translateX(-120%);
-    }
-    100% {
-      transform: translateX(400%);
-    }
-  }
-</style>

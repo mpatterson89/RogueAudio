@@ -40,11 +40,43 @@ export interface PlexLibrary {
 export interface AudiobookSummary {
   ratingKey: string;
   title: string;
+  /** Display string (joined authors). */
   author?: string | null;
+  /** Individual authors for collabs / author browse. */
+  authors?: string[];
   thumb?: string | null;
   year?: number | null;
   durationMs?: number | null;
   libraryKey?: string | null;
+}
+
+export interface PlexCollection {
+  ratingKey: string;
+  title: string;
+  thumb?: string | null;
+  childCount?: number | null;
+  libraryKey?: string | null;
+}
+
+export interface UserCollection {
+  id: string;
+  name: string;
+  ratingKeys: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type LibraryViewMode = "books" | "authors";
+
+export interface AuthorSummary {
+  key: string;
+  name: string;
+  bookCount: number;
+  thumbs: string[];
+  /** Newest year among this author's titles (for sort). */
+  latestYear?: number | null;
+  /** Oldest year among this author's titles (for sort). */
+  earliestYear?: number | null;
 }
 
 export interface StreamInfo {
@@ -113,7 +145,11 @@ export interface ProgressReport {
   trackIndex?: number | null;
 }
 
-export type SleepMode = "off" | "duration" | "end_of_chapter";
+export type SleepMode =
+  | "off"
+  | "duration"
+  | "end_of_chapter"
+  | "end_of_next_chapter";
 
 export interface SleepTimerState {
   mode: SleepMode;

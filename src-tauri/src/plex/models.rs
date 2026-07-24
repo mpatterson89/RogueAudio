@@ -77,11 +77,37 @@ impl PlexLibrary {
 pub struct AudiobookSummary {
     pub rating_key: String,
     pub title: String,
+    /// Display string (joined authors).
     pub author: Option<String>,
+    /// Individual authors (collabs split), for author browse / filtering.
+    #[serde(default)]
+    pub authors: Vec<String>,
     pub thumb: Option<String>,
     pub year: Option<i32>,
     pub duration_ms: Option<u64>,
     pub library_key: Option<String>,
+}
+
+/// A Plex collection (playlist-like group of library items).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlexCollection {
+    pub rating_key: String,
+    pub title: String,
+    pub thumb: Option<String>,
+    pub child_count: Option<u32>,
+    pub library_key: Option<String>,
+}
+
+/// User-defined collection stored in app data (per server + library).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserCollection {
+    pub id: String,
+    pub name: String,
+    pub rating_keys: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

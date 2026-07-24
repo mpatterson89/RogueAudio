@@ -1,7 +1,8 @@
-//! Offline audiobook downloads.
+//! Offline audiobook downloads with a persistent single-worker queue.
 //!
 //! Stores **original** library media parts (m4b/m4a/mp3/…) under
 //! `~/.local/share/rogue-audio/downloads/{ratingKey}/` plus a manifest.json.
+//! Queue pause/order lives in `download-queue.json`.
 //! Online streaming still uses the MP3 transcoder for WebKit compatibility.
 
 use crate::error::{AppError, AppResult};
@@ -10,7 +11,7 @@ use crate::storage::app_data_dir;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -19,12 +20,14 @@ use tauri::{AppHandle, Emitter};
 
 const MANIFEST_VERSION: u32 = 1;
 const EVENT_PROGRESS: &str = "download-progress";
+const EVENT_QUEUE: &str = "download-queue";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum DownloadStatus {
     Queued,
     Downloading,
+    Paused,
     Complete,
     Error,
     Cancelled,
@@ -35,10 +38,19 @@ impl DownloadStatus {
         match self {
             Self::Queued => "queued",
             Self::Downloading => "downloading",
+            Self::Paused => "paused",
             Self::Complete => "complete",
             Self::Error => "error",
             Self::Cancelled => "cancelled",
         }
+    }
+
+    /// Still in the offline queue (not finished / cancelled).
+    pub fn is_queue_member(&self) -> bool {
+        matches!(
+            self,
+            Self::Queued | Self::Downloading | Self::Paused | Self::Error
+        )
     }
 }
 
@@ -54,6 +66,9 @@ pub struct DownloadTrackMeta {
     /// Original container/extension (m4b, mp3, …).
     #[serde(default)]
     pub container: Option<String>,
+    /// WebKit-safe MP3 sidecar (`*.play.mp3`) when the original is AAC/M4B/MP4.
+    #[serde(default)]
+    pub playable_file_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +134,9 @@ pub struct DownloadItem {
     pub downloaded_at: Option<String>,
     /// Primary audio file name(s) for display.
     pub file_names: Vec<String>,
+    /// Position in the download queue (0-based). None when not queued.
+    #[serde(default)]
+    pub queue_index: Option<u32>,
 }
 
 impl From<&DownloadManifest> for DownloadItem {
@@ -129,11 +147,7 @@ impl From<&DownloadManifest> for DownloadItem {
                 .map(|d| d.join(name).to_string_lossy().to_string())
         });
         let bytes_on_disk = dir_size(&m.rating_key).unwrap_or(m.bytes_downloaded);
-        let file_names: Vec<String> = m
-            .tracks
-            .iter()
-            .map(|t| t.file_name.clone())
-            .collect();
+        let file_names: Vec<String> = m.tracks.iter().map(|t| t.file_name.clone()).collect();
         Self {
             rating_key: m.rating_key.clone(),
             server_id: m.server_id.clone(),
@@ -153,15 +167,183 @@ impl From<&DownloadManifest> for DownloadItem {
             cover_path,
             downloaded_at: m.downloaded_at.clone(),
             file_names,
+            queue_index: None,
         }
     }
 }
 
+/// Snapshot of the global download queue for the UI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueState {
+    pub paused: bool,
+    /// Items still in the queue (queued / downloading / paused / error), in order.
+    pub order: Vec<String>,
+    pub active_rating_key: Option<String>,
+    /// Sum of estimated bytes for queue members (queued + downloading + paused + error).
+    pub estimated_bytes: u64,
+    /// Bytes already downloaded for those queue members.
+    pub bytes_downloaded: u64,
+    /// estimated_bytes − bytes_downloaded (remaining to pull).
+    pub bytes_remaining: u64,
+    pub queued_count: u32,
+    pub active_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct QueuePersist {
+    #[serde(default)]
+    paused: bool,
+    #[serde(default)]
+    order: Vec<String>,
+}
+
+/// Per-job stop flags.
+struct JobFlags {
+    /// User cancelled this item (drop from queue; partials may be discarded).
+    cancel: Arc<AtomicBool>,
+    /// Queue paused — keep partials and mark status paused.
+    pause: Arc<AtomicBool>,
+}
+
+struct ManagerInner {
+    active: HashMap<String, JobFlags>,
+    order: Vec<String>,
+    paused: bool,
+    /// True while a worker task is running (one at a time).
+    running: bool,
+}
+
+impl Default for ManagerInner {
+    fn default() -> Self {
+        Self {
+            active: HashMap::new(),
+            order: Vec::new(),
+            paused: false,
+            running: false,
+        }
+    }
+}
+
+/// In-flight cancel/pause flags + ordered queue.
+#[derive(Default)]
+pub struct DownloadManager {
+    inner: Mutex<ManagerInner>,
+}
+
+impl DownloadManager {
+    fn with_inner<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut ManagerInner) -> R,
+    {
+        let mut guard = self.inner.lock().expect("download manager lock");
+        f(&mut guard)
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.with_inner(|i| i.paused)
+    }
+
+    pub fn is_active(&self, rating_key: &str) -> bool {
+        self.with_inner(|i| i.active.contains_key(rating_key))
+    }
+
+    pub fn active_rating_key(&self) -> Option<String> {
+        self.with_inner(|i| i.active.keys().next().cloned())
+    }
+
+    pub fn order(&self) -> Vec<String> {
+        self.with_inner(|i| i.order.clone())
+    }
+
+    fn request_cancel_item(&self, rating_key: &str) {
+        self.with_inner(|i| {
+            if let Some(flags) = i.active.get(rating_key) {
+                flags.cancel.store(true, Ordering::SeqCst);
+            }
+        });
+    }
+
+    /// Claim the single worker slot for `rating_key`.
+    fn try_begin(&self, rating_key: &str) -> Option<JobFlags> {
+        self.with_inner(|i| {
+            if i.running || i.paused {
+                return None;
+            }
+            if i.active.contains_key(rating_key) {
+                return None;
+            }
+            let flags = JobFlags {
+                cancel: Arc::new(AtomicBool::new(false)),
+                pause: Arc::new(AtomicBool::new(false)),
+            };
+            i.active.insert(
+                rating_key.to_string(),
+                JobFlags {
+                    cancel: Arc::clone(&flags.cancel),
+                    pause: Arc::clone(&flags.pause),
+                },
+            );
+            i.running = true;
+            Some(flags)
+        })
+    }
+
+    fn unregister(&self, rating_key: &str) {
+        self.with_inner(|i| {
+            i.active.remove(rating_key);
+            i.running = false;
+        });
+    }
+
+    fn persist_queue_locked(inner: &ManagerInner) {
+        let data = QueuePersist {
+            paused: inner.paused,
+            order: inner.order.clone(),
+        };
+        let _ = write_queue_persist(&data);
+    }
+
+    fn ensure_in_order_locked(inner: &mut ManagerInner, rating_key: &str) {
+        if !inner.order.iter().any(|k| k == rating_key) {
+            inner.order.push(rating_key.to_string());
+        }
+    }
+
+    fn remove_from_order_locked(inner: &mut ManagerInner, rating_key: &str) {
+        inner.order.retain(|k| k != rating_key);
+    }
+}
+
+fn queue_path() -> AppResult<PathBuf> {
+    Ok(app_data_dir()?.join("download-queue.json"))
+}
+
+fn read_queue_persist() -> QueuePersist {
+    let Ok(path) = queue_path() else {
+        return QueuePersist::default();
+    };
+    if !path.exists() {
+        return QueuePersist::default();
+    }
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn write_queue_persist(data: &QueuePersist) -> AppResult<()> {
+    let path = queue_path()?;
+    let raw = serde_json::to_string_pretty(data)
+        .map_err(|e| AppError::Message(e.to_string()))?;
+    fs::write(path, raw)?;
+    Ok(())
+}
+
 /// Strip spaces/punctuation → alphanumeric slug for file names.
 fn fs_slug(s: &str) -> String {
-    s.chars()
-        .filter(|c| c.is_alphanumeric())
-        .collect()
+    s.chars().filter(|c| c.is_alphanumeric()).collect()
 }
 
 /// `{title}-{series?}-{index?}-{author?}` with no spaces.
@@ -222,6 +404,7 @@ fn dir_size(rating_key: &str) -> AppResult<u64> {
 }
 
 /// After raw download as track_NNN.ext, rename to human-readable stem names.
+/// Only updates `file_name` when the target path actually exists afterward.
 fn rename_tracks_to_stem(
     dir: &Path,
     stem: &str,
@@ -229,15 +412,14 @@ fn rename_tracks_to_stem(
 ) -> AppResult<()> {
     let n = tracks.len();
     for (i, t) in tracks.iter_mut().enumerate() {
+        // Prefer the on-disk extension (m4b) over Plex Media.container (often "mp4"
+        // for AAC audiobooks) — renaming m4b→mp4 breaks WebKit playback.
         let ext = t
-            .container
-            .as_deref()
-            .or_else(|| {
-                t.file_name
-                    .rsplit('.')
-                    .next()
-                    .filter(|e| *e != t.file_name.as_str())
-            })
+            .file_name
+            .rsplit('.')
+            .next()
+            .filter(|e| *e != t.file_name.as_str() && !e.is_empty())
+            .or(t.container.as_deref())
             .unwrap_or("bin");
         let new_name = audio_file_name(stem, i, n, ext);
         if t.file_name == new_name {
@@ -245,20 +427,177 @@ fn rename_tracks_to_stem(
         }
         let from = dir.join(&t.file_name);
         let to = dir.join(&new_name);
-        if from.exists() {
-            if to.exists() && to != from {
-                let _ = fs::remove_file(&to);
+        if to.exists() && to != from {
+            // Already renamed on a previous attempt
+            if from.exists() {
+                let _ = fs::remove_file(&from);
             }
-            fs::rename(&from, &to)?;
-            // Drop stale m4a playback hardlinks for old names
-            let old_m4a = from.with_extension("m4a");
-            if old_m4a.exists() {
-                let _ = fs::remove_file(&old_m4a);
+            t.file_name = new_name;
+            continue;
+        }
+        if !from.exists() {
+            // Keep the old name if we cannot find the bytes
+            continue;
+        }
+        if let Err(e) = fs::rename(&from, &to) {
+            // Cross-device / busy: fall back to copy
+            if let Err(e2) = fs::copy(&from, &to).and_then(|_| fs::remove_file(&from)) {
+                return Err(AppError::Message(format!(
+                    "rename download file {} → {}: {e}; copy fallback: {e2}",
+                    from.display(),
+                    to.display()
+                )));
             }
+        }
+        let old_m4a = from.with_extension("m4a");
+        if old_m4a.exists() {
+            let _ = fs::remove_file(&old_m4a);
         }
         t.file_name = new_name;
     }
     Ok(())
+}
+
+fn partial_path_for(dest: &Path) -> PathBuf {
+    // Avoid Path::with_extension which can surprise on multi-dot names.
+    // Always append ".part" so track_000.mp4 → track_000.mp4.part
+    let mut name = dest
+        .file_name()
+        .map(|s| s.to_os_string())
+        .unwrap_or_else(|| "download".into());
+    name.push(".part");
+    dest.with_file_name(name)
+}
+
+fn is_audio_file_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if lower.ends_with(".part")
+        || lower.ends_with(".partial")
+        || lower.ends_with(".play.mp3")
+        || lower.ends_with(".play.mp3.part")
+    {
+        return false;
+    }
+    // Skip hardlink aliases created for WebKit (prefer original in heal)
+    // Heal uses unique originals; .m4a next to .m4b/.mp4 is usually an alias.
+    let ext = lower
+        .rsplit('.')
+        .next()
+        .unwrap_or_default();
+    matches!(
+        ext,
+        "m4b" | "m4a" | "mp3" | "mp4" | "aac" | "flac" | "ogg" | "opus" | "wma" | "m4v"
+    )
+}
+
+/// If a download left media on disk but never wrote track metadata (error at 99%),
+/// promote the folder to complete so offline playback works.
+pub fn heal_incomplete_manifest(rating_key: &str) -> AppResult<Option<DownloadManifest>> {
+    let Some(mut m) = read_manifest(rating_key)? else {
+        return Ok(None);
+    };
+    if m.status == DownloadStatus::Complete && !m.tracks.is_empty() {
+        // Verify files still exist
+        let dir = book_dir(rating_key)?;
+        let ok = m.tracks.iter().all(|t| dir.join(&t.file_name).is_file());
+        if ok {
+            return Ok(Some(m));
+        }
+    }
+
+    // Only heal error / interrupted states that look essentially finished
+    let candidates = matches!(
+        m.status,
+        DownloadStatus::Error
+            | DownloadStatus::Downloading
+            | DownloadStatus::Paused
+            | DownloadStatus::Queued
+            | DownloadStatus::Cancelled
+    );
+    if !candidates {
+        return Ok(Some(m));
+    }
+
+    let dir = book_dir(rating_key)?;
+    let mut audio: Vec<(String, u64)> = Vec::new();
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name == "manifest.json" || name == "cover.jpg" {
+                continue;
+            }
+            if !is_audio_file_name(&name) {
+                continue;
+            }
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_file() && meta.len() > 0 {
+                    audio.push((name, meta.len()));
+                }
+            }
+        }
+    }
+    if audio.is_empty() {
+        return Ok(Some(m));
+    }
+    audio.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Heal only when tracks metadata is broken/missing AND the file looks finished.
+    // Do not promote short / interrupted pulls to "complete" (was marking ~50% as done).
+    let tracks_missing = m.tracks.is_empty()
+        || m.tracks
+            .iter()
+            .any(|t| !dir.join(&t.file_name).is_file());
+    let on_disk: u64 = audio.iter().map(|(_, n)| *n).sum();
+    let expected = m.bytes_total.filter(|&t| t > 0);
+    let size_ok = match expected {
+        // Within 1% or 256 KiB of declared total
+        Some(exp) => {
+            let slack = (exp / 100).max(256 * 1024);
+            on_disk + slack >= exp && on_disk > 0
+        }
+        // No size hint: require high progress
+        None => m.progress >= 0.99 && on_disk > 1024 * 1024,
+    };
+    if !(tracks_missing && size_ok) {
+        return Ok(Some(m));
+    }
+
+    let total: u64 = audio.iter().map(|(_, n)| *n).sum();
+    m.tracks = audio
+        .into_iter()
+        .enumerate()
+        .map(|(i, (file_name, bytes))| {
+            let container = container_from_file_name(&file_name);
+            DownloadTrackMeta {
+                index: i as u32,
+                rating_key: m.rating_key.clone(),
+                title: if i == 0 {
+                    m.title.clone()
+                } else {
+                    format!("{} — part {}", m.title, i + 1)
+                },
+                duration_ms: None,
+                file_name,
+                bytes,
+                container: Some(container),
+                playable_file_name: None,
+            }
+        })
+        .collect();
+    m.track_count = m.tracks.len() as u32;
+    m.tracks_done = m.track_count;
+    m.bytes_downloaded = total;
+    m.bytes_total = Some(total);
+    m.progress = 1.0;
+    m.status = DownloadStatus::Complete;
+    m.error = None;
+    m.downloaded_at = m.downloaded_at.or_else(|| Some(now_rfc3339()));
+    m.updated_at = now_rfc3339();
+    if m.cover_file.is_none() && dir.join("cover.jpg").is_file() {
+        m.cover_file = Some("cover.jpg".into());
+    }
+    write_manifest(&m)?;
+    Ok(Some(m))
 }
 
 /// Fallback size estimate when Plex omits Part.size (~128 kbps AAC-ish).
@@ -278,39 +617,243 @@ fn container_from_file_name(name: &str) -> String {
         .unwrap_or_else(|| "bin".into())
 }
 
-/// For containers WebKit handles poorly by extension, expose a playable alias.
-fn playback_friendly_path(path: &Path, container: &str) -> PathBuf {
-    let ext = path
-        .extension()
+/// Extensions WebKit/HTMLAudio can usually play without a native AAC stack.
+fn is_web_safe_audio_ext(ext: &str) -> bool {
+    matches!(ext, "mp3" | "mpeg" | "ogg" | "opus" | "wav" | "flac")
+}
+
+fn file_ext_lower(path: &Path) -> String {
+    path.extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
-        .to_ascii_lowercase();
-    let needs_alias = ext == "m4b" || container.eq_ignore_ascii_case("m4b");
-    if !needs_alias {
+        .to_ascii_lowercase()
+}
+
+/// Sidecar next to the original: `Book.m4b` → `Book.play.mp3`.
+fn playable_sidecar_path(original: &Path) -> PathBuf {
+    let stem = original
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "audio".into());
+    original.with_file_name(format!("{stem}.play.mp3"))
+}
+
+fn needs_playable_transcode(path: &Path, container: &str) -> bool {
+    let ext = file_ext_lower(path);
+    if is_web_safe_audio_ext(&ext) {
+        return false;
+    }
+    let c = container.to_ascii_lowercase();
+    // mp3 already safe; treat empty as needing check by extension only
+    if is_web_safe_audio_ext(&c) {
+        return false;
+    }
+    true
+}
+
+/// Resolve the best path for HTML5 playback (never blocks on multi‑GB copies).
+fn resolve_playable_path(path: &Path, container: &str, playable_name: Option<&str>) -> PathBuf {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    if let Some(name) = playable_name {
+        let p = dir.join(name);
+        if p.is_file() {
+            return p;
+        }
+    }
+    let sidecar = playable_sidecar_path(path);
+    if sidecar.is_file() {
+        return sidecar;
+    }
+    let ext = file_ext_lower(path);
+    if is_web_safe_audio_ext(&ext) {
         return path.to_path_buf();
     }
-    let alias = path.with_extension("m4a");
-    if alias.exists() {
-        return alias;
-    }
-    // Hard link shares the same inode — no extra disk use; keeps original .m4b name.
-    if fs::hard_link(path, &alias).is_ok() {
-        return alias;
-    }
-    #[cfg(unix)]
+    // Cheap hardlink/symlink to .m4a — helps when WebKit has AAC + correct MIME.
+    // Never fs::copy: copying 0.5–1 GB on the IPC thread freezes the UI.
+    if matches!(ext.as_str(), "m4b" | "mp4" | "m4v" | "m4a")
+        || matches!(
+            container.to_ascii_lowercase().as_str(),
+            "m4b" | "mp4" | "aac" | "m4a" | "mp4a"
+        )
     {
-        if std::os::unix::fs::symlink(path, &alias).is_ok() {
+        let alias = path.with_extension("m4a");
+        if alias.is_file() {
             return alias;
+        }
+        if path.is_file() {
+            if fs::hard_link(path, &alias).is_ok() {
+                return alias;
+            }
+            #[cfg(unix)]
+            {
+                if std::os::unix::fs::symlink(path, &alias).is_ok() {
+                    return alias;
+                }
+            }
         }
     }
     path.to_path_buf()
 }
 
+/// Transcode original → `.play.mp3` with ffmpeg so WebKit can play offline AAC/M4B.
+fn transcode_to_playable_mp3(src: &Path, dest: &Path) -> AppResult<()> {
+    if !src.is_file() {
+        return Err(AppError::Message(format!(
+            "source missing for transcode: {}",
+            src.display()
+        )));
+    }
+    if dest.is_file() {
+        if let (Ok(s), Ok(d)) = (fs::metadata(src), fs::metadata(dest)) {
+            // Sidecar already present and non-trivial
+            if d.len() > 1024 * 64 && d.len() as f64 > s.len() as f64 * 0.15 {
+                return Ok(());
+            }
+        }
+    }
+    // Append .part (do not use with_extension — it replaces ".mp3" incorrectly)
+    let tmp = {
+        let mut p = dest.as_os_str().to_os_string();
+        p.push(".part");
+        PathBuf::from(p)
+    };
+    let _ = fs::remove_file(&tmp);
+
+    let status = std::process::Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-y",
+            "-i",
+        ])
+        .arg(src)
+        .args([
+            "-vn",
+            "-c:a",
+            "libmp3lame",
+            "-q:a",
+            "4", // VBR ~165kbps — faster encode, still fine for speech
+            "-map_metadata",
+            "0",
+            "-id3v2_version",
+            "3",
+            "-threads",
+            "0",
+        ])
+        .arg(&tmp)
+        .status()
+        .map_err(|e| {
+            AppError::Message(format!(
+                "ffmpeg failed to start (is it installed?): {e}"
+            ))
+        })?;
+
+    if !status.success() {
+        let _ = fs::remove_file(&tmp);
+        return Err(AppError::Message(format!(
+            "ffmpeg transcode failed for {}",
+            src.display()
+        )));
+    }
+    let len = fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0);
+    if len < 1024 {
+        let _ = fs::remove_file(&tmp);
+        return Err(AppError::Message("ffmpeg produced empty mp3".into()));
+    }
+    if dest.exists() {
+        let _ = fs::remove_file(dest);
+    }
+    fs::rename(&tmp, dest)?;
+    Ok(())
+}
+
+/// Ensure each track has a WebKit-playable file. Idempotent.
+pub fn ensure_playable(rating_key: &str) -> AppResult<DownloadItem> {
+    let Some(mut m) = read_manifest(rating_key)? else {
+        return Err(AppError::Message("download not found".into()));
+    };
+    if m.status != DownloadStatus::Complete {
+        return Err(AppError::Message(
+            "download is not complete — finish or resume it first".into(),
+        ));
+    }
+    let dir = book_dir(rating_key)?;
+    let mut changed = false;
+    for t in m.tracks.iter_mut() {
+        let original = dir.join(&t.file_name);
+        if !original.is_file() {
+            return Err(AppError::Message(format!(
+                "missing audio file: {}",
+                t.file_name
+            )));
+        }
+        let container = t
+            .container
+            .clone()
+            .unwrap_or_else(|| container_from_file_name(&t.file_name));
+        if !needs_playable_transcode(&original, &container) {
+            // Already web-safe (e.g. mp3)
+            if t.playable_file_name.is_some() {
+                t.playable_file_name = None;
+                changed = true;
+            }
+            continue;
+        }
+        let sidecar = playable_sidecar_path(&original);
+        let sidecar_name = sidecar
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| format!("{}.play.mp3", t.index));
+        if !sidecar.is_file() {
+            transcode_to_playable_mp3(&original, &sidecar)?;
+        }
+        if t.playable_file_name.as_deref() != Some(sidecar_name.as_str()) {
+            t.playable_file_name = Some(sidecar_name);
+            changed = true;
+        }
+    }
+    if changed {
+        m.updated_at = now_rfc3339();
+        write_manifest(&m)?;
+    }
+    Ok(DownloadItem::from(&m))
+}
+
+/// Whether every complete track has a web-safe path ready (no ffmpeg needed).
+pub fn playable_ready(rating_key: &str) -> bool {
+    let Ok(Some(m)) = read_manifest(rating_key) else {
+        return false;
+    };
+    if m.status != DownloadStatus::Complete || m.tracks.is_empty() {
+        return false;
+    }
+    let Ok(dir) = book_dir(rating_key) else {
+        return false;
+    };
+    m.tracks.iter().all(|t| {
+        let original = dir.join(&t.file_name);
+        if !original.is_file() {
+            return false;
+        }
+        let container = t
+            .container
+            .clone()
+            .unwrap_or_else(|| container_from_file_name(&t.file_name));
+        if !needs_playable_transcode(&original, &container) {
+            return true;
+        }
+        if let Some(name) = &t.playable_file_name {
+            if dir.join(name).is_file() {
+                return true;
+            }
+        }
+        playable_sidecar_path(&original).is_file()
+    })
+}
+
 /// Whole-book progress from completed parts + the in-flight part.
-///
-/// `current_expected` is Content-Length or a duration-based estimate for the
-/// active part. If the stream grows past that, the total expands so progress
-/// never freezes near 95% for multi-hour single-file books.
 fn whole_book_progress(
     completed_bytes: u64,
     current_bytes: u64,
@@ -319,7 +862,6 @@ fn whole_book_progress(
 ) -> (f32, u64) {
     let current_total = match current_expected {
         Some(expected) if expected > current_bytes => expected,
-        // Underestimated or unknown length: keep ~15% headroom so the bar can move
         Some(_) | None if current_bytes > 0 => {
             let headroom = (current_bytes as f64 * 0.15).round() as u64;
             current_bytes + headroom.max(256 * 1024)
@@ -334,46 +876,6 @@ fn whole_book_progress(
     let done = completed_bytes.saturating_add(current_bytes);
     let progress = (done as f64 / total as f64).clamp(0.0, 0.999) as f32;
     (progress, total)
-}
-
-/// In-flight cancel flags, keyed by rating key.
-#[derive(Default)]
-pub struct DownloadManager {
-    cancel: Mutex<HashMap<String, Arc<AtomicBool>>>,
-}
-
-impl DownloadManager {
-    pub fn request_cancel(&self, rating_key: &str) {
-        if let Ok(map) = self.cancel.lock() {
-            if let Some(flag) = map.get(rating_key) {
-                flag.store(true, Ordering::SeqCst);
-            }
-        }
-    }
-
-    /// Claim a download slot. Returns `None` if this title is already downloading.
-    pub fn try_begin(&self, rating_key: &str) -> Option<Arc<AtomicBool>> {
-        let mut map = self.cancel.lock().ok()?;
-        if map.contains_key(rating_key) {
-            return None;
-        }
-        let flag = Arc::new(AtomicBool::new(false));
-        map.insert(rating_key.to_string(), Arc::clone(&flag));
-        Some(flag)
-    }
-
-    fn unregister(&self, rating_key: &str) {
-        if let Ok(mut map) = self.cancel.lock() {
-            map.remove(rating_key);
-        }
-    }
-
-    pub fn is_active(&self, rating_key: &str) -> bool {
-        self.cancel
-            .lock()
-            .map(|m| m.contains_key(rating_key))
-            .unwrap_or(false)
-    }
 }
 
 pub fn downloads_root() -> AppResult<PathBuf> {
@@ -412,8 +914,8 @@ pub fn read_manifest(rating_key: &str) -> AppResult<Option<DownloadManifest>> {
 
 fn write_manifest(m: &DownloadManifest) -> AppResult<()> {
     let path = manifest_path(&m.rating_key)?;
-    let raw = serde_json::to_string_pretty(m)
-        .map_err(|e| AppError::Message(e.to_string()))?;
+    let raw =
+        serde_json::to_string_pretty(m).map_err(|e| AppError::Message(e.to_string()))?;
     fs::write(path, raw)?;
     Ok(())
 }
@@ -424,6 +926,10 @@ fn now_rfc3339() -> String {
 
 fn emit_item(app: &AppHandle, item: &DownloadItem) {
     let _ = app.emit(EVENT_PROGRESS, item);
+}
+
+fn emit_queue(app: &AppHandle, state: &QueueState) {
+    let _ = app.emit(EVENT_QUEUE, state);
 }
 
 pub fn list_downloads() -> AppResult<Vec<DownloadItem>> {
@@ -449,6 +955,11 @@ pub fn list_downloads() -> AppResult<Vec<DownloadItem>> {
             Ok(m) => m,
             Err(_) => continue,
         };
+        // Heal "99% + file on disk but error/empty tracks" leftovers
+        let m = match heal_incomplete_manifest(&m.rating_key) {
+            Ok(Some(healed)) => healed,
+            _ => m,
+        };
         out.push(DownloadItem::from(&m));
     }
     out.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
@@ -456,7 +967,62 @@ pub fn list_downloads() -> AppResult<Vec<DownloadItem>> {
 }
 
 pub fn get_download(rating_key: &str) -> AppResult<Option<DownloadItem>> {
+    if let Ok(Some(m)) = heal_incomplete_manifest(rating_key) {
+        return Ok(Some(DownloadItem::from(&m)));
+    }
     Ok(read_manifest(rating_key)?.as_ref().map(DownloadItem::from))
+}
+
+/// Build queue totals from on-disk manifests + manager order.
+pub fn compute_queue_state(manager: &DownloadManager) -> QueueState {
+    let paused = manager.is_paused();
+    let order = manager.order();
+    let active = manager.active_rating_key();
+
+    let mut estimated_bytes = 0u64;
+    let mut bytes_downloaded = 0u64;
+    let mut queued_count = 0u32;
+    let mut active_count = 0u32;
+
+    for key in &order {
+        let Ok(Some(m)) = read_manifest(key) else {
+            continue;
+        };
+        if !m.status.is_queue_member() {
+            continue;
+        }
+        let total = m
+            .bytes_total
+            .or_else(|| estimate_bytes_from_duration(m.duration_ms))
+            .unwrap_or(0);
+        let done = m.bytes_downloaded.min(if total > 0 { total } else { m.bytes_downloaded });
+        estimated_bytes = estimated_bytes.saturating_add(total.max(done));
+        bytes_downloaded = bytes_downloaded.saturating_add(done);
+        match m.status {
+            DownloadStatus::Downloading => active_count = active_count.saturating_add(1),
+            DownloadStatus::Queued | DownloadStatus::Paused | DownloadStatus::Error => {
+                queued_count = queued_count.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
+
+    let bytes_remaining = estimated_bytes.saturating_sub(bytes_downloaded);
+
+    QueueState {
+        paused,
+        order,
+        active_rating_key: active,
+        estimated_bytes,
+        bytes_downloaded,
+        bytes_remaining,
+        queued_count,
+        active_count,
+    }
+}
+
+pub fn queue_state(manager: &DownloadManager) -> QueueState {
+    compute_queue_state(manager)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -477,7 +1043,9 @@ pub struct LocalPlayback {
     pub cover_path: Option<String>,
 }
 
-/// Build PlaybackInfo pointing at local original files (absolute paths in `url`).
+/// Build PlaybackInfo pointing at local files.
+/// Prefers WebKit-safe `.play.mp3` sidecars and serves via the local media HTTP server
+/// (asset: protocol is unreliable for large audiobook files in WebKitGTK).
 pub fn local_playback(rating_key: &str) -> AppResult<Option<LocalPlayback>> {
     let Some(m) = read_manifest(rating_key)? else {
         return Ok(None);
@@ -499,24 +1067,33 @@ pub fn local_playback(rating_key: &str) -> AppResult<Option<LocalPlayback>> {
             .container
             .clone()
             .unwrap_or_else(|| container_from_file_name(&t.file_name));
-        // WebKit often won't map .m4b → audio/*; hardlink as .m4a for the asset URL only.
-        // The on-disk original remains .m4b (or whatever was downloaded).
-        let play_path = playback_friendly_path(&path, &container);
+        let play_path =
+            resolve_playable_path(&path, &container, t.playable_file_name.as_deref());
+        let play_container = file_ext_lower(&play_path);
+        // Prefer localhost media server so HTML5 gets Range + correct MIME.
+        // Fall back to absolute path for convertFileSrc if server is down.
+        let url = crate::media_server::url_for_download_file(&play_path)
+            .unwrap_or_else(|_| play_path.to_string_lossy().into_owned());
         tracks.push(PlaybackTrack {
             rating_key: t.rating_key.clone(),
             title: t.title.clone(),
             index: t.index,
             duration_ms: t.duration_ms,
-            url: play_path.to_string_lossy().to_string(),
-            container: Some(container),
+            url,
+            container: Some(if play_container.is_empty() {
+                container
+            } else {
+                play_container
+            }),
         });
     }
     if tracks.is_empty() {
         return Ok(None);
     }
-    let cover_path = m.cover_file.as_ref().map(|name| {
-        dir.join(name).to_string_lossy().to_string()
-    });
+    let cover_path = m
+        .cover_file
+        .as_ref()
+        .map(|name| dir.join(name).to_string_lossy().to_string());
     Ok(Some(LocalPlayback {
         playback: PlaybackInfo {
             book_rating_key: m.rating_key.clone(),
@@ -597,62 +1174,201 @@ fn download_http() -> AppResult<reqwest::Client> {
         .map_err(|e| AppError::Message(format!("download client: {e}")))
 }
 
-/// Download a URL to `dest`. `on_progress(downloaded, content_length)` is called
-/// as chunks arrive (`content_length` from headers when the server sends it).
+#[derive(Debug)]
+enum StopKind {
+    Cancel,
+    Pause,
+}
+
+fn check_stop(cancel: &AtomicBool, pause: &AtomicBool) -> Result<(), StopKind> {
+    if cancel.load(Ordering::SeqCst) {
+        return Err(StopKind::Cancel);
+    }
+    if pause.load(Ordering::SeqCst) {
+        return Err(StopKind::Pause);
+    }
+    Ok(())
+}
+
+/// Promote a temp/partial file to `dest`. Tolerates already-finalized files.
+fn promote_partial_to_dest(tmp: &Path, dest: &Path) -> AppResult<u64> {
+    if dest.is_file() {
+        let len = fs::metadata(dest)?.len();
+        if len > 0 {
+            if tmp.exists() {
+                let _ = fs::remove_file(tmp);
+            }
+            return Ok(len);
+        }
+    }
+    if !tmp.is_file() {
+        return Err(AppError::Message(format!(
+            "download temp missing: {}",
+            tmp.display()
+        )));
+    }
+    let len = fs::metadata(tmp)?.len();
+    if len == 0 {
+        let _ = fs::remove_file(tmp);
+        return Err(AppError::Message("download produced empty file".into()));
+    }
+    if dest.exists() {
+        let _ = fs::remove_file(dest);
+    }
+    match fs::rename(tmp, dest) {
+        Ok(()) => Ok(fs::metadata(dest).map(|m| m.len()).unwrap_or(len)),
+        Err(e) => {
+            // rename can fail across filesystems or if dest is busy — copy instead
+            fs::copy(tmp, dest).map_err(|e2| {
+                AppError::Message(format!(
+                    "finalize download {} → {}: rename: {e}; copy: {e2}",
+                    tmp.display(),
+                    dest.display()
+                ))
+            })?;
+            let _ = fs::remove_file(tmp);
+            Ok(fs::metadata(dest).map(|m| m.len()).unwrap_or(len))
+        }
+    }
+}
+
+/// Download a URL to `dest`, resuming from an existing `.part` when possible.
+/// `on_progress(downloaded_including_resume, full_content_length_opt)` is called
+/// as chunks arrive.
 async fn download_url_to_file(
     client: &reqwest::Client,
     url: &str,
     dest: &Path,
     cancel: &AtomicBool,
+    pause: &AtomicBool,
     mut on_progress: impl FnMut(u64, Option<u64>),
-) -> AppResult<u64> {
-    let tmp = dest.with_extension("partial");
-    if tmp.exists() {
-        let _ = fs::remove_file(&tmp);
+) -> Result<u64, AppError> {
+    // Already finished on a previous run
+    if dest.is_file() {
+        match fs::metadata(dest) {
+            Ok(meta) if meta.len() > 0 => {
+                let len = meta.len();
+                on_progress(len, Some(len));
+                return Ok(len);
+            }
+            _ => {}
+        }
     }
 
-    let res = client
-        .get(url)
+    // Prefer new ".part" suffix; also resume legacy ".partial" extension temps
+    let tmp = partial_path_for(dest);
+    let legacy_tmp = dest.with_extension("partial");
+    if !tmp.exists() && legacy_tmp.exists() {
+        let _ = fs::rename(&legacy_tmp, &tmp);
+    }
+
+    let mut existing = if tmp.is_file() {
+        fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0)
+    } else {
+        0
+    };
+
+    let mut req = client.get(url);
+    if existing > 0 {
+        req = req.header("Range", format!("bytes={existing}-"));
+    }
+
+    let res = req
         .send()
         .await
         .map_err(|e| AppError::Message(format!("download request failed: {e}")))?;
 
-    if !res.status().is_success() {
+    let status = res.status();
+    if status.as_u16() == 416 && existing > 0 {
+        // Range not satisfiable — partial may already be complete
+        if let Err(e) = check_stop(cancel, pause).map_err(stop_to_err) {
+            return Err(e);
+        }
+        let len = promote_partial_to_dest(&tmp, dest)?;
+        on_progress(len, Some(len));
+        return Ok(len);
+    }
+
+    if !status.is_success() {
         return Err(AppError::Message(format!(
             "download HTTP {}: {}",
-            res.status(),
+            status,
             dest.display()
         )));
     }
 
-    let content_length = res.content_length().filter(|&n| n > 0);
-    // Announce size as soon as headers are known (progress bar can scale correctly)
-    on_progress(0, content_length);
+    // 200 with a Range request ⇒ server ignored Range; restart from 0
+    let is_partial = status.as_u16() == 206;
+    if existing > 0 && !is_partial {
+        existing = 0;
+        let _ = fs::remove_file(&tmp);
+    }
 
-    let mut file = fs::File::create(&tmp)?;
-    let mut total = 0u64;
+    let content_length = res.content_length().filter(|&n| n > 0);
+    let full_expected = if is_partial {
+        // Content-Length is the remaining body size
+        content_length.map(|n| n.saturating_add(existing))
+    } else {
+        content_length
+    };
+
+    on_progress(existing, full_expected);
+
+    let mut file = if existing > 0 && is_partial && tmp.is_file() {
+        match fs::OpenOptions::new().append(true).open(&tmp) {
+            Ok(mut f) => {
+                let _ = f.seek(SeekFrom::End(0));
+                f
+            }
+            Err(_) => {
+                // Partial vanished between stat and open — start over
+                existing = 0;
+                on_progress(0, full_expected);
+                fs::File::create(&tmp)?
+            }
+        }
+    } else {
+        fs::File::create(&tmp)?
+    };
+
+    let mut total = existing;
     let mut stream = res;
     loop {
-        if cancel.load(Ordering::SeqCst) {
+        if let Err(kind) = check_stop(cancel, pause) {
             drop(file);
-            let _ = fs::remove_file(&tmp);
-            return Err(AppError::Message("download cancelled".into()));
+            // Keep partial for pause/resume; discard on cancel
+            if matches!(kind, StopKind::Cancel) {
+                let _ = fs::remove_file(&tmp);
+            }
+            return Err(stop_to_err(kind));
         }
         match stream.chunk().await {
             Ok(Some(chunk)) => {
-                file.write_all(&chunk)?;
+                if let Err(e) = file.write_all(&chunk) {
+                    drop(file);
+                    return Err(AppError::Message(format!(
+                        "download write error ({}): {e}",
+                        tmp.display()
+                    )));
+                }
                 total += chunk.len() as u64;
-                on_progress(total, content_length);
+                on_progress(total, full_expected);
             }
             Ok(None) => break,
             Err(e) => {
                 drop(file);
-                let _ = fs::remove_file(&tmp);
+                // Keep partial so the next attempt can resume after network blips
                 return Err(AppError::Message(format!("download stream error: {e}")));
             }
         }
     }
-    file.flush()?;
+    if let Err(e) = file.flush() {
+        drop(file);
+        return Err(AppError::Message(format!(
+            "download flush error ({}): {e}",
+            tmp.display()
+        )));
+    }
     drop(file);
 
     if total == 0 {
@@ -660,11 +1376,15 @@ async fn download_url_to_file(
         return Err(AppError::Message("download produced empty file".into()));
     }
 
-    if dest.exists() {
-        let _ = fs::remove_file(dest);
+    let final_len = promote_partial_to_dest(&tmp, dest)?;
+    Ok(final_len)
+}
+
+fn stop_to_err(kind: StopKind) -> AppError {
+    match kind {
+        StopKind::Cancel => AppError::Message("download cancelled".into()),
+        StopKind::Pause => AppError::Message("download paused".into()),
     }
-    fs::rename(&tmp, dest)?;
-    Ok(total)
 }
 
 async fn try_download_cover(
@@ -672,79 +1392,390 @@ async fn try_download_cover(
     detail: &BookDetail,
     dir: &Path,
     cancel: &AtomicBool,
+    pause: &AtomicBool,
 ) -> Option<String> {
     let url = detail.thumb.as_ref().or(detail.art.as_ref())?;
-    if cancel.load(Ordering::SeqCst) {
+    if check_stop(cancel, pause).is_err() {
         return None;
     }
     let dest = dir.join("cover.jpg");
-    match download_url_to_file(client, url, &dest, cancel, |_, _| {}).await {
+    if dest.exists() {
+        return Some("cover.jpg".into());
+    }
+    match download_url_to_file(client, url, &dest, cancel, pause, |_, _| {}).await {
         Ok(_) => Some("cover.jpg".into()),
         Err(_) => None,
     }
 }
 
-/// Run the full download job. Emits `download-progress` events.
-///
-/// `cancel` must come from [`DownloadManager::try_begin`] so the slot is claimed
-/// before the async task is spawned.
-pub async fn run_download(
-    app: AppHandle,
-    manager: Arc<DownloadManager>,
-    cancel: Arc<AtomicBool>,
+/// Enqueue a book. Does not start work when the queue is paused or busy.
+pub fn enqueue(
+    app: &AppHandle,
+    manager: &Arc<DownloadManager>,
     server_id: String,
     rating_key: String,
 ) -> AppResult<DownloadItem> {
+    if let Some(m) = read_manifest(&rating_key)? {
+        if m.status == DownloadStatus::Complete {
+            return Ok(DownloadItem::from(&m));
+        }
+    }
+
+    // Seed / refresh a queued manifest without wiping resume progress
+    let mut manifest = if let Some(existing) = read_manifest(&rating_key)? {
+        existing
+    } else {
+        DownloadManifest {
+            version: MANIFEST_VERSION,
+            rating_key: rating_key.clone(),
+            server_id: server_id.clone(),
+            title: "Queued…".into(),
+            author: None,
+            summary: None,
+            year: None,
+            duration_ms: None,
+            library_key: None,
+            studio: None,
+            series: None,
+            series_index: None,
+            file_stem: None,
+            chapters: vec![],
+            tracks: vec![],
+            cover_file: None,
+            status: DownloadStatus::Queued,
+            progress: 0.0,
+            error: None,
+            tracks_done: 0,
+            track_count: 0,
+            bytes_downloaded: 0,
+            bytes_total: None,
+            downloaded_at: None,
+            updated_at: now_rfc3339(),
+        }
+    };
+
+    // Preserve partial progress; re-queue from error/cancelled/paused
+    if manifest.status != DownloadStatus::Downloading || !manager.is_active(&rating_key) {
+        if manifest.status != DownloadStatus::Complete {
+            manifest.status = if manager.is_paused() {
+                DownloadStatus::Paused
+            } else {
+                DownloadStatus::Queued
+            };
+            manifest.error = None;
+            manifest.server_id = server_id;
+            manifest.updated_at = now_rfc3339();
+            write_manifest(&manifest)?;
+        }
+    }
+
+    manager.with_inner(|inner| {
+        DownloadManager::ensure_in_order_locked(inner, &rating_key);
+        DownloadManager::persist_queue_locked(inner);
+    });
+
+    let mut item = DownloadItem::from(&manifest);
+    let order = manager.order();
+    item.queue_index = order
+        .iter()
+        .position(|k| k == &rating_key)
+        .map(|i| i as u32);
+    emit_item(app, &item);
+    emit_queue(app, &compute_queue_state(manager));
+
+    pump_queue(app.clone(), Arc::clone(manager));
+
+    Ok(item)
+}
+
+/// Cancel one item (remove from queue; stop if active).
+pub fn cancel_item(app: &AppHandle, manager: &Arc<DownloadManager>, rating_key: &str) -> AppResult<()> {
+    manager.with_inner(|inner| {
+        DownloadManager::remove_from_order_locked(inner, rating_key);
+        DownloadManager::persist_queue_locked(inner);
+        if let Some(flags) = inner.active.get(rating_key) {
+            flags.cancel.store(true, Ordering::SeqCst);
+        }
+    });
+
+    // If not actively running, mark cancelled immediately
+    if !manager.is_active(rating_key) {
+        if let Ok(Some(mut m)) = read_manifest(rating_key) {
+            if m.status.is_queue_member() {
+                m.status = DownloadStatus::Cancelled;
+                m.error = None;
+                m.updated_at = now_rfc3339();
+                let _ = write_manifest(&m);
+                emit_item(app, &DownloadItem::from(&m));
+            }
+        }
+    }
+
+    emit_queue(app, &compute_queue_state(manager));
+    // If we cancelled a waiting item, try to start the next
+    pump_queue(app.clone(), Arc::clone(manager));
+    Ok(())
+}
+
+/// Pause the whole queue; in-flight job keeps partials.
+pub fn pause_queue(app: &AppHandle, manager: &Arc<DownloadManager>) -> AppResult<QueueState> {
+    manager.with_inner(|inner| {
+        inner.paused = true;
+        for flags in inner.active.values() {
+            flags.pause.store(true, Ordering::SeqCst);
+        }
+        DownloadManager::persist_queue_locked(inner);
+    });
+
+    // Mark non-active queue members as paused for UI consistency
+    let order = manager.order();
+    for key in order {
+        if manager.is_active(&key) {
+            continue;
+        }
+        if let Ok(Some(mut m)) = read_manifest(&key) {
+            if matches!(
+                m.status,
+                DownloadStatus::Queued | DownloadStatus::Downloading
+            ) {
+                m.status = DownloadStatus::Paused;
+                m.updated_at = now_rfc3339();
+                let _ = write_manifest(&m);
+                emit_item(app, &DownloadItem::from(&m));
+            }
+        }
+    }
+
+    let state = compute_queue_state(manager);
+    emit_queue(app, &state);
+    Ok(state)
+}
+
+/// Resume the queue and start the next job if idle.
+pub fn resume_queue(app: &AppHandle, manager: &Arc<DownloadManager>) -> AppResult<QueueState> {
+    manager.with_inner(|inner| {
+        inner.paused = false;
+        DownloadManager::persist_queue_locked(inner);
+    });
+
+    let order = manager.order();
+    for key in order {
+        if let Ok(Some(mut m)) = read_manifest(&key) {
+            if matches!(
+                m.status,
+                DownloadStatus::Paused | DownloadStatus::Error | DownloadStatus::Downloading
+            ) && !manager.is_active(&key)
+            {
+                m.status = DownloadStatus::Queued;
+                m.error = None;
+                m.updated_at = now_rfc3339();
+                let _ = write_manifest(&m);
+                emit_item(app, &DownloadItem::from(&m));
+            }
+        }
+    }
+
+    let state = compute_queue_state(manager);
+    emit_queue(app, &state);
+    pump_queue(app.clone(), Arc::clone(manager));
+    Ok(state)
+}
+
+/// Cold-start: reload persisted queue, heal interrupted jobs, maybe auto-resume.
+pub fn restore_queue(app: &AppHandle, manager: &Arc<DownloadManager>) -> AppResult<QueueState> {
+    let persist = read_queue_persist();
+
+    manager.with_inner(|inner| {
+        inner.paused = persist.paused;
+        inner.order = persist.order;
+        inner.active.clear();
+        inner.running = false;
+    });
+
+    // Heal any "downloading" left from a crash / force-quit
+    let mut found: Vec<String> = Vec::new();
+    if let Ok(items) = list_downloads() {
+        for item in items {
+            let Ok(Some(mut m)) = read_manifest(&item.rating_key) else {
+                continue;
+            };
+            match m.status {
+                DownloadStatus::Downloading => {
+                    m.status = if persist.paused {
+                        DownloadStatus::Paused
+                    } else {
+                        DownloadStatus::Queued
+                    };
+                    m.updated_at = now_rfc3339();
+                    let _ = write_manifest(&m);
+                    emit_item(app, &DownloadItem::from(&m));
+                    found.push(m.rating_key);
+                }
+                DownloadStatus::Queued | DownloadStatus::Paused | DownloadStatus::Error => {
+                    found.push(m.rating_key);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    manager.with_inner(|inner| {
+        // Keep persisted order; append any healed keys that were missing
+        for key in found {
+            if !inner.order.iter().any(|k| k == &key) {
+                inner.order.push(key);
+            }
+        }
+        // Drop order entries that no longer exist or are complete/cancelled
+        inner.order.retain(|k| {
+            read_manifest(k)
+                .ok()
+                .flatten()
+                .map(|m| m.status.is_queue_member())
+                .unwrap_or(false)
+        });
+        DownloadManager::persist_queue_locked(inner);
+    });
+
+    let state = compute_queue_state(manager);
+    emit_queue(app, &state);
+
+    if !persist.paused {
+        pump_queue(app.clone(), Arc::clone(manager));
+    }
+
+    Ok(state)
+}
+
+/// Start the next queued job when the worker is free and the queue is not paused.
+pub fn pump_queue(app: AppHandle, manager: Arc<DownloadManager>) {
+    let next = manager.with_inner(|inner| {
+        if inner.paused || inner.running {
+            return None;
+        }
+        // Only auto-start ready items. Errors wait for resume/retry; paused waits for resume.
+        for key in inner.order.clone() {
+            if let Ok(Some(m)) = read_manifest(&key) {
+                let ready = matches!(
+                    m.status,
+                    DownloadStatus::Queued | DownloadStatus::Downloading
+                );
+                if ready {
+                    return Some((m.server_id, key));
+                }
+            }
+        }
+        None
+    });
+
+    let Some((server_id, rating_key)) = next else {
+        return;
+    };
+
+    let Some(flags) = manager.try_begin(&rating_key) else {
+        return;
+    };
+
+    let mgr = Arc::clone(&manager);
+    let app2 = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let result = run_download(
+            app2.clone(),
+            Arc::clone(&mgr),
+            flags,
+            server_id,
+            rating_key.clone(),
+        )
+        .await;
+        if let Err(e) = result {
+            eprintln!("download {rating_key} failed: {e}");
+        }
+        // Continue with next item when this one finishes (unless paused)
+        pump_queue(app2, mgr);
+    });
+}
+
+/// Run the full download job. Emits `download-progress` events.
+async fn run_download(
+    app: AppHandle,
+    manager: Arc<DownloadManager>,
+    flags: JobFlags,
+    server_id: String,
+    rating_key: String,
+) -> AppResult<DownloadItem> {
+    let cancel = flags.cancel;
+    let pause = flags.pause;
+
     // Already complete — no-op
     if let Some(m) = read_manifest(&rating_key)? {
         if m.status == DownloadStatus::Complete {
+            manager.with_inner(|inner| {
+                DownloadManager::remove_from_order_locked(inner, &rating_key);
+                DownloadManager::persist_queue_locked(inner);
+            });
             manager.unregister(&rating_key);
             let item = DownloadItem::from(&m);
             emit_item(&app, &item);
+            emit_queue(&app, &compute_queue_state(&manager));
             return Ok(item);
         }
     }
 
     let dir = book_dir(&rating_key)?;
 
-    let mut manifest = DownloadManifest {
-        version: MANIFEST_VERSION,
-        rating_key: rating_key.clone(),
-        server_id: server_id.clone(),
-        title: "Downloading…".into(),
-        author: None,
-        summary: None,
-        year: None,
-        duration_ms: None,
-        library_key: None,
-        studio: None,
-        series: None,
-        series_index: None,
-        file_stem: None,
-        chapters: vec![],
-        tracks: vec![],
-        cover_file: None,
-        status: DownloadStatus::Downloading,
-        progress: 0.0,
-        error: None,
-        tracks_done: 0,
-        track_count: 0,
-        bytes_downloaded: 0,
-        bytes_total: None,
-        downloaded_at: None,
-        updated_at: now_rfc3339(),
+    // Resume from existing manifest when present
+    let mut manifest = if let Some(existing) = read_manifest(&rating_key)? {
+        existing
+    } else {
+        DownloadManifest {
+            version: MANIFEST_VERSION,
+            rating_key: rating_key.clone(),
+            server_id: server_id.clone(),
+            title: "Downloading…".into(),
+            author: None,
+            summary: None,
+            year: None,
+            duration_ms: None,
+            library_key: None,
+            studio: None,
+            series: None,
+            series_index: None,
+            file_stem: None,
+            chapters: vec![],
+            tracks: vec![],
+            cover_file: None,
+            status: DownloadStatus::Downloading,
+            progress: 0.0,
+            error: None,
+            tracks_done: 0,
+            track_count: 0,
+            bytes_downloaded: 0,
+            bytes_total: None,
+            downloaded_at: None,
+            updated_at: now_rfc3339(),
+        }
     };
+
+    manifest.status = DownloadStatus::Downloading;
+    manifest.error = None;
+    manifest.server_id = server_id.clone();
+    if manifest.title.is_empty() || manifest.title == "Queued…" {
+        manifest.title = "Downloading…".into();
+    }
+    manifest.updated_at = now_rfc3339();
     write_manifest(&manifest)?;
     emit_item(&app, &DownloadItem::from(&manifest));
+    emit_queue(&app, &compute_queue_state(&manager));
 
     let result = async {
         let detail = plex::get_book_detail(&server_id, &rating_key).await?;
-        // Full book: every original media part (m4b/mp3/…), not transcoder streams.
         let parts = plex::get_downloadable_parts(&server_id, &rating_key).await?;
 
         if parts.is_empty() {
             return Err(AppError::Message("no playable tracks to download".into()));
         }
+
+        check_stop(&cancel, &pause).map_err(stop_to_err)?;
 
         let total_duration_ms: Option<u64> = {
             let sum: u64 = parts.iter().filter_map(|p| p.duration_ms).sum();
@@ -772,7 +1803,7 @@ pub async fn run_download(
         ));
         manifest.chapters = detail.chapters.clone();
         manifest.track_count = parts.len() as u32;
-        // Prefer Plex Part.size for accurate whole-book progress
+
         let part_estimates: Vec<u64> = parts
             .iter()
             .map(|p| {
@@ -787,17 +1818,18 @@ pub async fn run_download(
         } else {
             estimate_bytes_from_duration(manifest.duration_ms).unwrap_or(0)
         };
-        manifest.bytes_total = (book_estimate > 0).then_some(book_estimate);
+        if book_estimate > 0 {
+            manifest.bytes_total = Some(book_estimate.max(manifest.bytes_downloaded));
+        }
         manifest.updated_at = now_rfc3339();
         write_manifest(&manifest)?;
         emit_item(&app, &DownloadItem::from(&manifest));
+        emit_queue(&app, &compute_queue_state(&manager));
 
         let client = download_http()?;
 
-        // Cover is best-effort (does not affect book progress %)
-        if let Some(cover) = try_download_cover(&client, &detail, &dir, &cancel).await {
+        if let Some(cover) = try_download_cover(&client, &detail, &dir, &cancel, &pause).await {
             manifest.cover_file = Some(cover.clone());
-            // Also land in the shared library cover cache
             let cover_path = dir.join(&cover);
             if let Err(e) = crate::covers::import_file(&server_id, &rating_key, &cover_path) {
                 eprintln!("cover cache import failed: {e}");
@@ -806,12 +1838,59 @@ pub async fn run_download(
         }
 
         let n_parts = parts.len();
-        let mut track_metas: Vec<DownloadTrackMeta> = Vec::with_capacity(n_parts);
-        let mut last_emit_bytes = 0u64;
+        // Keep completed tracks from a previous run
+        let mut track_metas: Vec<DownloadTrackMeta> = manifest
+            .tracks
+            .iter()
+            .filter(|t| {
+                let p = dir.join(&t.file_name);
+                p.exists() && t.bytes > 0
+            })
+            .cloned()
+            .collect();
+        // Also accept track_NNN.ext from interrupted multi-part jobs
+        for (i, part) in parts.iter().enumerate() {
+            if track_metas.iter().any(|t| t.index == i as u32) {
+                continue;
+            }
+            let ext = part.file_ext.trim_matches('.').to_ascii_lowercase();
+            let ext = if ext.is_empty() {
+                "bin".to_string()
+            } else {
+                ext
+            };
+            let candidate = dir.join(format!("track_{i:03}.{ext}"));
+            if candidate.exists() {
+                let bytes = fs::metadata(&candidate).map(|m| m.len()).unwrap_or(0);
+                if bytes > 0 {
+                    track_metas.push(DownloadTrackMeta {
+                        index: i as u32,
+                        rating_key: part.rating_key.clone(),
+                        title: part.title.clone(),
+                        duration_ms: part.duration_ms,
+                        file_name: format!("track_{i:03}.{ext}"),
+                        bytes,
+                        container: Some(part.container.clone()),
+                        playable_file_name: None,
+                    });
+                }
+            }
+        }
+        track_metas.sort_by_key(|t| t.index);
+
+        let mut last_emit_bytes = track_metas.iter().map(|t| t.bytes).sum::<u64>();
+        let mut last_emit_at = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(2))
+            .unwrap_or_else(std::time::Instant::now);
 
         for (i, part) in parts.iter().enumerate() {
-            if cancel.load(Ordering::SeqCst) {
-                return Err(AppError::Message("download cancelled".into()));
+            check_stop(&cancel, &pause).map_err(stop_to_err)?;
+
+            // Skip parts already fully on disk
+            if let Some(existing) = track_metas.iter().find(|t| t.index == i as u32) {
+                if dir.join(&existing.file_name).exists() {
+                    continue;
+                }
             }
 
             let ext = part.file_ext.trim_matches('.').to_ascii_lowercase();
@@ -841,30 +1920,36 @@ pub async fn run_download(
                 &part.url,
                 &dest,
                 &cancel,
+                &pause,
                 |n, content_length| {
-                    // Prefer Content-Length, then Plex Part.size, then duration guess
                     let expected = content_length.or(size_est);
                     let (progress, total) =
                         whole_book_progress(completed_bytes, n, expected, &future_estimates);
                     manifest.progress = progress;
                     manifest.bytes_downloaded = completed_bytes.saturating_add(n);
                     manifest.bytes_total = Some(total);
-                    manifest.tracks_done = i as u32; // current part not finished yet
+                    manifest.tracks_done = i as u32;
                     manifest.updated_at = now_rfc3339();
 
-                    // Throttle UI/disk: first chunk, every ~256 KiB
-                    let delta = manifest
-                        .bytes_downloaded
-                        .saturating_sub(last_emit_bytes);
-                    if n == 0 || delta >= 256 * 1024 {
+                    // Throttle disk + UI: every ~2 MiB or 750ms (avoids UI freezes during play)
+                    let delta = manifest.bytes_downloaded.saturating_sub(last_emit_bytes);
+                    let due = last_emit_at.elapsed() >= std::time::Duration::from_millis(750);
+                    if n == 0 || delta >= 2 * 1024 * 1024 || due {
                         last_emit_bytes = manifest.bytes_downloaded;
+                        last_emit_at = std::time::Instant::now();
                         let _ = write_manifest(&manifest);
                         emit_item(&app, &DownloadItem::from(&manifest));
+                        // Queue totals less often — scanning manifests is expensive
+                        if delta >= 4 * 1024 * 1024 || n == 0 {
+                            emit_queue(&app, &compute_queue_state(&manager));
+                        }
                     }
                 },
             )
             .await?;
 
+            // Replace any stale meta for this index
+            track_metas.retain(|t| t.index != track_index);
             track_metas.push(DownloadTrackMeta {
                 index: track_index,
                 rating_key: part.rating_key.clone(),
@@ -873,7 +1958,9 @@ pub async fn run_download(
                 file_name,
                 bytes,
                 container: Some(part.container.clone()),
+                playable_file_name: None,
             });
+            track_metas.sort_by_key(|t| t.index);
 
             let done_bytes: u64 = track_metas.iter().map(|t| t.bytes).sum();
             let remaining_est: u64 = future_estimates.iter().sum();
@@ -889,10 +1976,10 @@ pub async fn run_download(
             };
 
             manifest.tracks = track_metas.clone();
-            manifest.tracks_done = (i + 1) as u32;
+            manifest.tracks_done = track_metas.len() as u32;
             manifest.bytes_downloaded = done_bytes;
             manifest.bytes_total = Some(total_after.max(done_bytes));
-            manifest.progress = if i + 1 >= n_parts {
+            manifest.progress = if track_metas.len() >= n_parts {
                 1.0
             } else {
                 progress_after
@@ -901,10 +1988,18 @@ pub async fn run_download(
             last_emit_bytes = done_bytes;
             write_manifest(&manifest)?;
             emit_item(&app, &DownloadItem::from(&manifest));
+            emit_queue(&app, &compute_queue_state(&manager));
         }
 
-        // Sanity: we must have saved every part of the book
         if track_metas.len() != n_parts {
+            // Last chance: maybe files were renamed / healed on disk already
+            if let Ok(Some(healed)) = heal_incomplete_manifest(&rating_key) {
+                if healed.status == DownloadStatus::Complete {
+                    let item = DownloadItem::from(&healed);
+                    emit_item(&app, &item);
+                    return Ok(item);
+                }
+            }
             return Err(AppError::Message(format!(
                 "download incomplete: got {} of {} parts",
                 track_metas.len(),
@@ -912,13 +2007,17 @@ pub async fn run_download(
             )));
         }
 
-        // Rename track_000.ext → Title-Series-1-Author.ext (no spaces)
-        let stem = manifest
-            .file_stem
-            .clone()
-            .unwrap_or_else(|| book_file_stem(&manifest.title, None, None, manifest.author.as_deref()));
+        let stem = manifest.file_stem.clone().unwrap_or_else(|| {
+            book_file_stem(
+                &manifest.title,
+                manifest.series.as_deref(),
+                manifest.series_index,
+                manifest.author.as_deref(),
+            )
+        });
         if let Err(e) = rename_tracks_to_stem(&dir, &stem, &mut track_metas) {
             eprintln!("rename download files failed: {e}");
+            // Still complete with track_NNN names if files exist
         }
         manifest.file_stem = Some(stem);
         manifest.tracks = track_metas;
@@ -930,36 +2029,141 @@ pub async fn run_download(
         manifest.bytes_total = Some(manifest.bytes_downloaded);
         manifest.downloaded_at = Some(now_rfc3339());
         manifest.updated_at = now_rfc3339();
-        write_manifest(&manifest)?;
-        let item = DownloadItem::from(&manifest);
-        emit_item(&app, &item);
-        Ok(item)
+        if let Err(e) = write_manifest(&manifest) {
+            // Media is on disk — try once more after a heal pass
+            eprintln!("complete manifest write failed: {e}");
+            if let Ok(Some(healed)) = heal_incomplete_manifest(&rating_key) {
+                if healed.status == DownloadStatus::Complete {
+                    let item = DownloadItem::from(&healed);
+                    emit_item(&app, &item);
+                    return Ok(item);
+                }
+            }
+            return Err(e);
+        }
+
+        // Build WebKit-safe MP3 sidecars for AAC/M4B (HTMLAudio cannot play them reliably).
+        // Best-effort: download is still complete if ffmpeg is missing.
+        let rk_play = rating_key.clone();
+        match tauri::async_runtime::spawn_blocking(move || ensure_playable(&rk_play)).await {
+            Ok(Ok(item)) => {
+                emit_item(&app, &item);
+                Ok(item)
+            }
+            Ok(Err(e)) => {
+                eprintln!("ensure_playable after download: {e}");
+                let item = DownloadItem::from(&manifest);
+                emit_item(&app, &item);
+                Ok(item)
+            }
+            Err(e) => {
+                eprintln!("ensure_playable join: {e}");
+                let item = DownloadItem::from(&manifest);
+                emit_item(&app, &item);
+                Ok(item)
+            }
+        }
     }
     .await;
 
     manager.unregister(&rating_key);
 
     match result {
-        Ok(item) => Ok(item),
+        Ok(item) => {
+            manager.with_inner(|inner| {
+                DownloadManager::remove_from_order_locked(inner, &rating_key);
+                DownloadManager::persist_queue_locked(inner);
+            });
+            emit_queue(&app, &compute_queue_state(&manager));
+            Ok(item)
+        }
         Err(e) => {
             let msg = e.to_string();
             let cancelled = msg.contains("cancelled");
+            let paused = msg.contains("paused");
+
+            // If the bytes made it to disk, prefer complete over a spurious error
+            if !cancelled && !paused {
+                if let Ok(Some(healed)) = heal_incomplete_manifest(&rating_key) {
+                    if healed.status == DownloadStatus::Complete {
+                        manager.with_inner(|inner| {
+                            DownloadManager::remove_from_order_locked(inner, &rating_key);
+                            DownloadManager::persist_queue_locked(inner);
+                        });
+                        let item = DownloadItem::from(&healed);
+                        emit_item(&app, &item);
+                        emit_queue(&app, &compute_queue_state(&manager));
+                        return Ok(item);
+                    }
+                }
+            }
+
             if let Ok(Some(mut m)) = read_manifest(&rating_key) {
                 m.status = if cancelled {
                     DownloadStatus::Cancelled
+                } else if paused {
+                    DownloadStatus::Paused
                 } else {
                     DownloadStatus::Error
                 };
-                m.error = Some(msg.clone());
+                m.error = if cancelled || paused {
+                    None
+                } else {
+                    Some(msg.clone())
+                };
                 m.updated_at = now_rfc3339();
                 let _ = write_manifest(&m);
                 emit_item(&app, &DownloadItem::from(&m));
             }
             if cancelled {
+                manager.with_inner(|inner| {
+                    DownloadManager::remove_from_order_locked(inner, &rating_key);
+                    DownloadManager::persist_queue_locked(inner);
+                });
+            }
+            // On pause: keep in order; on error: keep in order for retry on resume
+            emit_queue(&app, &compute_queue_state(&manager));
+            if cancelled {
                 Err(AppError::Message("download cancelled".into()))
+            } else if paused {
+                // Soft stop — not a failure for the caller
+                get_download(&rating_key)?
+                    .ok_or_else(|| AppError::Message("download paused".into()))
             } else {
                 Err(e)
             }
         }
     }
+}
+
+/// Called when removing a book: cancel job + drop from queue + delete files.
+pub fn remove_item(
+    app: &AppHandle,
+    manager: &Arc<DownloadManager>,
+    rating_key: &str,
+) -> AppResult<()> {
+    manager.request_cancel_item(rating_key);
+    manager.with_inner(|inner| {
+        DownloadManager::remove_from_order_locked(inner, rating_key);
+        DownloadManager::persist_queue_locked(inner);
+    });
+    // Give the worker a moment to notice cancel; files deleted regardless
+    remove_download(rating_key)?;
+    emit_queue(app, &compute_queue_state(manager));
+    pump_queue(app.clone(), Arc::clone(manager));
+    Ok(())
+}
+
+pub fn remove_all_items(app: &AppHandle, manager: &Arc<DownloadManager>) -> AppResult<u32> {
+    let order = manager.order();
+    for key in order {
+        manager.request_cancel_item(&key);
+    }
+    manager.with_inner(|inner| {
+        inner.order.clear();
+        DownloadManager::persist_queue_locked(inner);
+    });
+    let n = remove_all_downloads()?;
+    emit_queue(app, &compute_queue_state(manager));
+    Ok(n)
 }

@@ -5,11 +5,15 @@
   let {
     books,
     selectedKey = null,
+    showMenu = true,
     onselect,
+    onaddToCollection,
   }: {
     books: AudiobookSummary[];
     selectedKey?: string | null;
+    showMenu?: boolean;
     onselect?: (book: AudiobookSummary) => void;
+    onaddToCollection?: (book: AudiobookSummary) => void;
   } = $props();
 </script>
 
@@ -21,13 +25,15 @@
   </div>
 {:else}
   <div
-    class="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6"
+    class="grid grid-cols-2 gap-3 overflow-visible sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6"
   >
     {#each books as book (book.ratingKey)}
       <BookCard
         {book}
         selected={selectedKey === book.ratingKey}
+        {showMenu}
         onclick={() => onselect?.(book)}
+        {onaddToCollection}
       />
     {/each}
   </div>

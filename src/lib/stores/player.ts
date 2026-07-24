@@ -43,6 +43,11 @@ interface PlayerState {
   error: string | null;
   ready: boolean;
   loading: boolean;
+  /**
+   * Continue elsewhere: push/pull position with Plex for this book.
+   * Per-title preference loaded from disk when a book is loaded.
+   */
+  progressSyncEnabled: boolean;
 }
 
 const initialSleep: SleepTimerState = {
@@ -68,6 +73,7 @@ const initial: PlayerState = {
   error: null,
   ready: false,
   loading: false,
+  progressSyncEnabled: false,
 };
 
 function trackOffsets(tracks: PlaybackTrack[]): number[] {
@@ -136,12 +142,14 @@ function withQuery(url: string, patch: Record<string, string | null>): string {
   return `${base}?${out}`;
 }
 
-/** Local offline files (asset protocol / absolute paths converted for webview). */
+/** Local offline files (media server / asset protocol / absolute paths). */
 function isLocalStream(url: string): boolean {
   return (
     url.startsWith("asset:") ||
     url.includes("asset.localhost") ||
     url.startsWith("file:") ||
+    url.includes("127.0.0.1") ||
+    url.startsWith("http://localhost") ||
     url.startsWith("/") // absolute path before convertFileSrc (shouldn't reach engine)
   );
 }
@@ -171,11 +179,13 @@ function toPlayableUrl(pathOrUrl: string): string {
     pathOrUrl.startsWith("https://") ||
     pathOrUrl.startsWith("asset:") ||
     pathOrUrl.startsWith("file:") ||
-    pathOrUrl.includes("asset.localhost")
+    pathOrUrl.includes("asset.localhost") ||
+    pathOrUrl.includes("127.0.0.1")
   ) {
+    // Local media server (http://127.0.0.1:port/d/…) or remote stream
     return pathOrUrl;
   }
-  // Absolute filesystem path from download_local_playback
+  // Absolute filesystem path fallback → asset protocol
   try {
     return convertFileSrc(pathOrUrl);
   } catch {
@@ -259,14 +269,20 @@ function createPlayerStore() {
     // Don't wipe bookmarks with a 0 write while still loading
     if (s.loading && s.positionSec <= 0) return;
     try {
-      await progressApi.report({
-        ratingKey: s.book.ratingKey,
-        state,
-        timeMs: Math.floor(Math.max(0, s.positionSec) * 1000),
-        durationMs: s.durationSec ? Math.floor(s.durationSec * 1000) : null,
-        speed: s.rate,
-        trackIndex: s.tracks.length ? s.trackIndex : null,
-      });
+      await progressApi.report(
+        {
+          ratingKey: s.book.ratingKey,
+          state,
+          timeMs: Math.floor(Math.max(0, s.positionSec) * 1000),
+          durationMs: s.durationSec ? Math.floor(s.durationSec * 1000) : null,
+          speed: s.rate,
+          trackIndex: s.tracks.length ? s.trackIndex : null,
+        },
+        {
+          serverId: s.serverId,
+          syncToPlex: s.progressSyncEnabled && !!s.serverId,
+        },
+      );
       lastProgressFlush = Date.now();
     } catch {
       /* best-effort */
@@ -278,7 +294,7 @@ function createPlayerStore() {
     progressInterval = setInterval(() => {
       const s = get(store);
       if (!s.playing || !s.book) return;
-      // Save more often so restarts land near the true position
+      // Local often (~5s); Plex timeline is included when Continue elsewhere is on
       if (Date.now() - lastProgressFlush > 5_000) {
         void flushProgress("playing");
       }
@@ -325,8 +341,12 @@ function createPlayerStore() {
         return;
       }
 
-      // End of current chapter — uses Plex chapter timestamps on the book timeline
-      if (s.sleep.mode === "end_of_chapter" && s.sleep.chapterEndMs != null) {
+      // End of current / next chapter — book-timeline markers
+      if (
+        (s.sleep.mode === "end_of_chapter" ||
+          s.sleep.mode === "end_of_next_chapter") &&
+        s.sleep.chapterEndMs != null
+      ) {
         const posMs = s.positionSec * 1000;
         // Small grace so we don't fire immediately if we're already at the boundary
         if (posMs >= s.sleep.chapterEndMs - 250) {
@@ -336,69 +356,87 @@ function createPlayerStore() {
     }, 400);
   }
 
+  function chapterEndMs(
+    chapters: { startMs: number; endMs?: number | null; title: string }[],
+    index: number,
+    bookDurMs: number | null,
+  ): { endMs: number; title: string } {
+    const ch = chapters[index];
+    const end =
+      ch.endMs ??
+      chapters[index + 1]?.startMs ??
+      bookDurMs ??
+      ch.startMs;
+    return { endMs: end, title: ch.title };
+  }
+
   /**
-   * Resolve where the current chapter ends on the book timeline (ms).
-   * Prefer Plex embedded chapter markers; fall back to end of current track/part.
+   * Resolve where a chapter ends on the book timeline (ms).
+   * @param chapterOffset 0 = current chapter, 1 = next chapter, etc.
+   * Prefer Plex embedded chapter markers; fall back to track/part boundaries.
    */
-  async function resolveChapterEnd(): Promise<{ endMs: number; title: string | null }> {
+  async function resolveChapterEnd(
+    chapterOffset = 0,
+  ): Promise<{ endMs: number; title: string | null }> {
     const s = get(store);
     const posMs = Math.max(0, s.positionSec * 1000);
     const bookDurMs = s.durationSec > 0 ? Math.floor(s.durationSec * 1000) : null;
+    const offset = Math.max(0, Math.floor(chapterOffset));
+
+    function fromChapters(
+      chapters: { startMs: number; endMs?: number | null; title: string }[],
+      fallbackDur: number | null,
+    ): { endMs: number; title: string | null } | null {
+      if (chapters.length === 0) return null;
+
+      let currentIdx = chapters.length - 1;
+      for (let i = 0; i < chapters.length; i++) {
+        const start = chapters[i].startMs;
+        const end =
+          chapters[i].endMs ??
+          chapters[i + 1]?.startMs ??
+          fallbackDur ??
+          start;
+        if (posMs >= start && posMs < end) {
+          currentIdx = i;
+          break;
+        }
+        if (posMs < start) {
+          currentIdx = Math.max(0, i - 1);
+          break;
+        }
+      }
+
+      const targetIdx = Math.min(currentIdx + offset, chapters.length - 1);
+      return chapterEndMs(chapters, targetIdx, fallbackDur);
+    }
 
     // 1) Prefer chapters already on the player, then cached book detail
     if (s.chapters.length > 0) {
-      const chapters = s.chapters;
-      for (let i = 0; i < chapters.length; i++) {
-        const ch = chapters[i];
-        const start = ch.startMs;
-        const end =
-          ch.endMs ??
-          chapters[i + 1]?.startMs ??
-          bookDurMs ??
-          start;
-        if (posMs >= start && posMs < end) {
-          return { endMs: end, title: ch.title };
-        }
-      }
-      const last = chapters[chapters.length - 1];
-      const end = last.endMs ?? bookDurMs ?? last.startMs;
-      return { endMs: end, title: last.title };
+      const hit = fromChapters(s.chapters, bookDurMs);
+      if (hit) return hit;
     }
 
     if (s.book && s.serverId) {
       try {
         const detail = await getBookDetail(s.serverId, s.book.ratingKey);
         const chapters = detail.chapters ?? [];
-        if (chapters.length > 0) {
-          for (let i = 0; i < chapters.length; i++) {
-            const ch = chapters[i];
-            const start = ch.startMs;
-            const end =
-              ch.endMs ??
-              chapters[i + 1]?.startMs ??
-              detail.durationMs ??
-              bookDurMs ??
-              start;
-            // Current chapter: position is within [start, end)
-            // If exactly at end of previous, treat as next chapter's range
-            if (posMs >= start && posMs < end) {
-              return { endMs: end, title: ch.title };
-            }
-          }
-          // Past last start — use last chapter end / book end
-          const last = chapters[chapters.length - 1];
-          const end =
-            last.endMs ?? detail.durationMs ?? bookDurMs ?? last.startMs;
-          return { endMs: end, title: last.title };
-        }
+        const hit = fromChapters(
+          chapters,
+          detail.durationMs ?? bookDurMs,
+        );
+        if (hit) return hit;
       } catch {
         /* fall through to track boundary */
       }
     }
 
-    // 2) Fallback: end of the current file/track (multi-part books)
+    // 2) Fallback: end of current / next file/track (multi-part books)
     const offsets = trackOffsets(s.tracks);
-    const idx = s.trackIndex;
+    const idx = Math.min(
+      s.trackIndex + offset,
+      Math.max(0, s.tracks.length - 1),
+    );
     const trackStartMs = Math.floor((offsets[idx] ?? 0) * 1000);
     const trackDur = s.tracks[idx]?.durationMs ?? 0;
     if (trackDur > 0) {
@@ -514,6 +552,14 @@ function createPlayerStore() {
     engine.pause();
     stopProgressLoop();
 
+    // Load Continue elsewhere preference for this title
+    let syncEnabled = false;
+    try {
+      syncEnabled = await progressApi.syncGetEnabled(book.ratingKey);
+    } catch {
+      syncEnabled = false;
+    }
+
     update((s) => ({
       ...s,
       book,
@@ -527,6 +573,7 @@ function createPlayerStore() {
       ready: false,
       loading: true,
       error: null,
+      progressSyncEnabled: syncEnabled,
     }));
 
     try {
@@ -535,7 +582,38 @@ function createPlayerStore() {
       let totalDurationMs: number | null | undefined;
       let chapters: BookChapter[] = [];
 
-      const local = await downloadsApi.localPlayback(book.ratingKey).catch(() => null);
+      // Offline: prefer local files. AAC/M4B need an MP3 sidecar (ffmpeg) for WebKit.
+      let local = await downloadsApi.localPlayback(book.ratingKey).catch(() => null);
+      if (local?.playback?.tracks?.length) {
+        const ready = await downloadsApi
+          .playableReady(book.ratingKey)
+          .catch(() => false);
+        if (!ready) {
+          // AAC/M4B must be converted to MP3 for WebKit — can take several minutes
+          update((s) => ({
+            ...s,
+            error: "Preparing offline audio for playback (one-time)…",
+            loading: true,
+          }));
+          try {
+            await downloadsApi.ensurePlayable(book.ratingKey);
+            local =
+              (await downloadsApi.localPlayback(book.ratingKey).catch(() => null)) ??
+              local;
+            update((s) => ({ ...s, error: null }));
+          } catch (prepErr) {
+            console.warn("ensurePlayable failed", prepErr);
+            update((s) => ({
+              ...s,
+              error:
+                prepErr instanceof Error
+                  ? `Could not prepare offline audio: ${prepErr.message}`
+                  : String(prepErr),
+            }));
+            // Still try local path (media server + m4a) if prepare failed
+          }
+        }
+      }
 
       if (local?.playback?.tracks?.length) {
         tracks = local.playback.tracks.map((t) => ({
@@ -579,7 +657,10 @@ function createPlayerStore() {
       let targetSec = opts.startSec ?? 0;
       if (!opts.ignoreResume && opts.startSec === undefined) {
         try {
-          const progress = await progressApi.get(book.ratingKey);
+          // Continue elsewhere: merge local + Plex; otherwise local only
+          const progress = syncEnabled
+            ? await progressApi.getMerged(serverId, book.ratingKey)
+            : await progressApi.get(book.ratingKey);
           if (progress && progress.positionMs > 5_000) {
             targetSec = progress.positionMs / 1000;
           }
@@ -724,15 +805,30 @@ function createPlayerStore() {
      * fixed duration. Falls back to end of the current track/part if no markers.
      */
     async setSleepEndOfChapter() {
+      await this.setSleepEndOfChapterOffset(0, "end_of_chapter");
+    },
+
+    /**
+     * Stop at the end of the *next* chapter (skips the rest of the current one
+     * and the following chapter). Falls back to next track/part if no markers.
+     */
+    async setSleepEndOfNextChapter() {
+      await this.setSleepEndOfChapterOffset(1, "end_of_next_chapter");
+    },
+
+    async setSleepEndOfChapterOffset(
+      chapterOffset: number,
+      mode: "end_of_chapter" | "end_of_next_chapter",
+    ) {
       const s = get(store);
       if (!s.book) return;
       try {
-        const { endMs, title } = await resolveChapterEnd();
+        const { endMs, title } = await resolveChapterEnd(chapterOffset);
         update((st) => ({
           ...st,
           sleep: {
             ...initialSleep,
-            mode: "end_of_chapter",
+            mode,
             minutes: 0,
             endsAt: null,
             chapterEndMs: endMs,
@@ -760,6 +856,84 @@ function createPlayerStore() {
     skip(deltaSec: number) {
       const s = get(store);
       void this.seek(Math.max(0, s.positionSec + deltaSec));
+    },
+
+    /**
+     * Continue elsewhere: enable/disable Plex position sync for the current book.
+     * When enabling, merges with Plex and seeks if Plex is ahead.
+     */
+    async setProgressSyncEnabled(enabled: boolean): Promise<{
+      enabled: boolean;
+      positionMs: number;
+      source: string;
+      message: string | null;
+    }> {
+      const s = get(store);
+      if (!s.book || !s.serverId) {
+        return {
+          enabled: false,
+          positionMs: 0,
+          source: "local",
+          message: "No book loaded",
+        };
+      }
+      const ratingKey = s.book.ratingKey;
+      const serverId = s.serverId;
+
+      if (!enabled) {
+        await progressApi.syncSetEnabled(ratingKey, false);
+        update((st) => ({ ...st, progressSyncEnabled: false }));
+        // Final local save without Plex
+        void flushProgress(s.playing ? "playing" : "paused");
+        return {
+          enabled: false,
+          positionMs: Math.floor(s.positionSec * 1000),
+          source: "local",
+          message: "Stopped syncing with Plex",
+        };
+      }
+
+      // Enable + merge local ↔ Plex
+      const beforeMs = Math.floor(Math.max(0, s.positionSec) * 1000);
+      // Push current position into local first so merge sees latest from this session
+      if (s.ready && beforeMs > 0) {
+        await progressApi.report(
+          {
+            ratingKey,
+            state: s.playing ? "playing" : "paused",
+            timeMs: beforeMs,
+            durationMs: s.durationSec ? Math.floor(s.durationSec * 1000) : null,
+            speed: s.rate,
+            trackIndex: s.tracks.length ? s.trackIndex : null,
+          },
+          { serverId, syncToPlex: false },
+        );
+      }
+
+      const merged = await progressApi.syncEnableAndMerge(serverId, ratingKey);
+      update((st) => ({ ...st, progressSyncEnabled: true }));
+
+      const mergedSec = merged.positionMs / 1000;
+      let message: string | null = null;
+      if (Math.abs(merged.positionMs - beforeMs) > 5_000 && s.ready) {
+        await this.seek(mergedSec, s.playing);
+        if (merged.positionMs > beforeMs + 5_000) {
+          message = "Resumed from Plex";
+        } else {
+          message = "Updated Plex from this device";
+        }
+      } else {
+        // Ensure Plex has our position
+        void flushProgress(s.playing ? "playing" : "paused");
+        message = "Syncing with Plex & Plexamp";
+      }
+
+      return {
+        enabled: true,
+        positionMs: merged.positionMs,
+        source: merged.source ?? "merged",
+        message,
+      };
     },
   };
 }

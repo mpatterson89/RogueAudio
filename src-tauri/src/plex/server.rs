@@ -268,18 +268,13 @@ fn map_album_metadata(
         .unwrap_or("Untitled")
         .to_string();
 
-    let author = m
-        .get("parentTitle")
-        .and_then(|v| v.as_str())
-        .or_else(|| m.get("originalTitle").and_then(|v| v.as_str()))
-        .map(|s| s.to_string())
-        .filter(|s| !s.is_empty());
+    let parent = m.get("parentTitle").and_then(|v| v.as_str());
+    let original = m.get("originalTitle").and_then(|v| v.as_str());
+    let (authors, author) = super::authors::authors_from_metadata(parent, original);
 
     let year = m.get("year").and_then(|v| v.as_i64()).map(|y| y as i32);
 
-    let duration_ms = m.get("duration").and_then(|v| v.as_u64()).or_else(|| {
-        m.pointer("/Media/0/duration").and_then(|v| v.as_u64())
-    });
+    let duration_ms = extract_duration_ms(m);
 
     let thumb = m
         .get("thumb")
@@ -290,11 +285,176 @@ fn map_album_metadata(
         rating_key,
         title,
         author,
+        authors,
         thumb,
         year,
         duration_ms,
         library_key: Some(library_key.into()),
     })
+}
+
+/// Plex may send duration as number or string; albums may only have Media/Part durations.
+fn json_duration_ms(v: Option<&serde_json::Value>) -> Option<u64> {
+    let v = v?;
+    match v {
+        serde_json::Value::Number(n) => n
+            .as_u64()
+            .or_else(|| n.as_f64().map(|f| f.round() as u64))
+            .filter(|&d| d > 0),
+        serde_json::Value::String(s) => s.parse::<u64>().ok().filter(|&d| d > 0),
+        _ => None,
+    }
+}
+
+fn extract_duration_ms(m: &serde_json::Value) -> Option<u64> {
+    if let Some(d) = json_duration_ms(m.get("duration")) {
+        return Some(d);
+    }
+    // Sum Media[] durations (multi-part albums)
+    if let Some(media) = m.get("Media").and_then(|v| v.as_array()) {
+        let mut sum = 0u64;
+        let mut any = false;
+        for med in media {
+            if let Some(d) = json_duration_ms(med.get("duration")) {
+                sum = sum.saturating_add(d);
+                any = true;
+                continue;
+            }
+            // Fall back to Part durations under this Media
+            if let Some(parts) = med.get("Part").and_then(|v| v.as_array()) {
+                for p in parts {
+                    if let Some(d) = json_duration_ms(p.get("duration")) {
+                        sum = sum.saturating_add(d);
+                        any = true;
+                    }
+                }
+            }
+        }
+        if any && sum > 0 {
+            return Some(sum);
+        }
+    }
+    json_duration_ms(m.pointer("/Media/0/duration"))
+        .or_else(|| json_duration_ms(m.pointer("/Media/0/Part/0/duration")))
+}
+
+/// Plex collection type (works for many section types including music).
+const TYPE_COLLECTION: &str = "18";
+
+/// List collections defined on a library section (Plex-side).
+pub async fn list_collections(
+    server_id: &str,
+    library_key: &str,
+) -> AppResult<Vec<crate::plex::models::PlexCollection>> {
+    let session = connect(server_id).await?;
+    // Prefer dedicated collections endpoint; fall back to type filter.
+    let paths = [
+        format!("/library/sections/{library_key}/collections"),
+        format!("/library/sections/{library_key}/all?type={TYPE_COLLECTION}"),
+    ];
+
+    let mut raw: Option<serde_json::Value> = None;
+    for path in &paths {
+        match pms_get_json(&session.base_uri, path, &session.token).await {
+            Ok(v) => {
+                raw = Some(v);
+                break;
+            }
+            Err(_) => continue,
+        }
+    }
+    let Some(raw) = raw else {
+        return Ok(vec![]);
+    };
+
+    let items = raw
+        .pointer("/MediaContainer/Metadata")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut out: Vec<crate::plex::models::PlexCollection> = items
+        .into_iter()
+        .filter_map(|m| {
+            let rating_key = m.get("ratingKey")?.as_str()?.to_string();
+            let title = m
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Untitled")
+                .to_string();
+            let child_count = m
+                .get("childCount")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as u32);
+            let thumb = m
+                .get("thumb")
+                .and_then(|v| v.as_str())
+                .map(|path| absolute_media_url(&session.base_uri, path, &session.token));
+            Some(crate::plex::models::PlexCollection {
+                rating_key,
+                title,
+                thumb,
+                child_count,
+                library_key: Some(library_key.into()),
+            })
+        })
+        .collect();
+
+    out.sort_by(|a, b| a.title.to_ascii_lowercase().cmp(&b.title.to_ascii_lowercase()));
+    Ok(out)
+}
+
+/// Albums/books inside a Plex collection.
+pub async fn collection_books(
+    server_id: &str,
+    collection_rating_key: &str,
+) -> AppResult<Vec<AudiobookSummary>> {
+    let session = connect(server_id).await?;
+    let path = format!("/library/collections/{collection_rating_key}/children");
+    let raw: serde_json::Value =
+        pms_get_json(&session.base_uri, &path, &session.token).await?;
+
+    let items = raw
+        .pointer("/MediaContainer/Metadata")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let library_key = raw
+        .pointer("/MediaContainer/librarySectionID")
+        .map(|v| match v {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Number(n) => n.to_string(),
+            _ => String::new(),
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default();
+
+    let books = items
+        .into_iter()
+        .filter_map(|m| {
+            // Only album-like items
+            let t = m
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if t != "album" && t != "9" && !m.get("parentTitle").is_some() {
+                // still try map — some agents omit type
+            }
+            let lib = m
+                .get("librarySectionID")
+                .map(|v| match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Number(n) => n.to_string(),
+                    _ => library_key.clone(),
+                })
+                .unwrap_or_else(|| library_key.clone());
+            map_album_metadata(&m, &session, &lib)
+        })
+        .collect();
+
+    Ok(books)
 }
 
 pub(crate) fn absolute_media_url(base_uri: &str, path: &str, token: &str) -> String {

@@ -1,7 +1,7 @@
 use crate::error::AppResult;
 use crate::plex::{
     self, AudiobookSummary, AuthStatus, BookDetail, PlaybackInfo, PinAuthPoll, PinAuthStart,
-    PlexLibrary, PlexServer, StreamInfo,
+    PlexCollection, PlexLibrary, PlexServer, StreamInfo,
 };
 use crate::PlexAuthState;
 use tauri::State;
@@ -73,6 +73,30 @@ pub async fn plex_list_books(
         return Err(crate::error::AppError::NotAuthenticated);
     }
     plex::list_books(&server_id, &library_key, query.as_deref()).await
+}
+
+/// Plex collections on a music/audiobook library section.
+#[tauri::command]
+pub async fn plex_list_collections(
+    server_id: String,
+    library_key: String,
+) -> AppResult<Vec<PlexCollection>> {
+    if !plex::is_authenticated() {
+        return Err(crate::error::AppError::NotAuthenticated);
+    }
+    plex::list_collections(&server_id, &library_key).await
+}
+
+/// Books inside a Plex collection.
+#[tauri::command]
+pub async fn plex_collection_books(
+    server_id: String,
+    collection_rating_key: String,
+) -> AppResult<Vec<AudiobookSummary>> {
+    if !plex::is_authenticated() {
+        return Err(crate::error::AppError::NotAuthenticated);
+    }
+    plex::collection_books(&server_id, &collection_rating_key).await
 }
 
 /// Full book detail for the book view (summary, art, chapters).

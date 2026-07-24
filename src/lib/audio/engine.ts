@@ -77,6 +77,14 @@ export class Html5AudioEngine implements AudioEngine {
     // Invalidate any in-flight load
     const token = ++this.loadToken;
 
+    const isLocal =
+      url.startsWith("asset:") ||
+      url.includes("asset.localhost") ||
+      url.startsWith("file:") ||
+      url.startsWith("blob:") ||
+      url.includes("127.0.0.1") ||
+      url.startsWith("http://localhost");
+
     // Fully reset previous source (important when switching chapter streams)
     try {
       this.audio.pause();
@@ -85,6 +93,9 @@ export class Html5AudioEngine implements AudioEngine {
     }
     this.audio.removeAttribute("src");
     this.audio.load();
+
+    // Large local files + concurrent downloads: avoid aggressive full preload (UI freeze)
+    this.audio.preload = isLocal ? "metadata" : "auto";
 
     await new Promise<void>((resolve, reject) => {
       let settled = false;
@@ -115,6 +126,7 @@ export class Html5AudioEngine implements AudioEngine {
         clearTimeout(timer);
       };
 
+      const timeoutMs = isLocal ? 20_000 : 45_000;
       const timer = setTimeout(() => {
         // Transcodes can be slow to produce frames; if we have duration, proceed.
         if (!settled && token === this.loadToken && this.audio.src) {
@@ -126,7 +138,7 @@ export class Html5AudioEngine implements AudioEngine {
             );
           }
         }
-      }, 45_000);
+      }, timeoutMs);
 
       this.audio.addEventListener("canplay", onReady);
       this.audio.addEventListener("loadedmetadata", onReady);

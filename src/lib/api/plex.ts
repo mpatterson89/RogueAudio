@@ -6,6 +6,7 @@ import type {
   PlaybackInfo,
   PinAuthPoll,
   PinAuthStart,
+  PlexCollection,
   PlexLibrary,
   PlexServer,
   StreamInfo,
@@ -26,6 +27,16 @@ export const plexApi = {
       serverId,
       libraryKey,
       query: query ?? null,
+    }),
+  listCollections: (serverId: string, libraryKey: string) =>
+    invoke<PlexCollection[]>("plex_list_collections", {
+      serverId,
+      libraryKey,
+    }),
+  collectionBooks: (serverId: string, collectionRatingKey: string) =>
+    invoke<AudiobookSummary[]>("plex_collection_books", {
+      serverId,
+      collectionRatingKey,
     }),
   getBookDetail: (serverId: string, ratingKey: string) =>
     invoke<BookDetail>("plex_get_book_detail", { serverId, ratingKey }),

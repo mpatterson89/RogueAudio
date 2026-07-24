@@ -1,11 +1,23 @@
-use crate::downloads::{self, DownloadItem, DownloadManager, LocalPlayback};
+use crate::downloads::{
+    self, DownloadItem, DownloadManager, LocalPlayback, QueueState,
+};
 use crate::error::AppResult;
 use std::sync::Arc;
 use tauri::{AppHandle, State};
 
 #[tauri::command]
-pub fn download_list() -> AppResult<Vec<DownloadItem>> {
-    downloads::list_downloads()
+pub fn download_list(manager: State<'_, Arc<DownloadManager>>) -> AppResult<Vec<DownloadItem>> {
+    let mut items = downloads::list_downloads()?;
+    let order = manager.order();
+    let index: std::collections::HashMap<&str, u32> = order
+        .iter()
+        .enumerate()
+        .map(|(i, k)| (k.as_str(), i as u32))
+        .collect();
+    for item in items.iter_mut() {
+        item.queue_index = index.get(item.rating_key.as_str()).copied();
+    }
+    Ok(items)
 }
 
 #[tauri::command]
@@ -13,10 +25,9 @@ pub fn download_get(rating_key: String) -> AppResult<Option<DownloadItem>> {
     downloads::get_download(&rating_key)
 }
 
-/// Start (or no-op if already complete) an offline download for a book.
-/// Returns immediately; progress is streamed via the `download-progress` event.
+/// Add a book to the offline download queue (starts when the worker is free).
 #[tauri::command]
-pub async fn download_enqueue(
+pub fn download_enqueue(
     app: AppHandle,
     manager: State<'_, Arc<DownloadManager>>,
     server_id: String,
@@ -25,109 +36,73 @@ pub async fn download_enqueue(
     if !crate::plex::is_authenticated() {
         return Err(crate::error::AppError::NotAuthenticated);
     }
-
-    // Already finished
-    if let Some(item) = downloads::get_download(&rating_key)? {
-        if item.status == "complete" {
-            return Ok(item);
-        }
-        if item.status == "downloading" || item.status == "queued" {
-            // Job may still be running
-            if manager.is_active(&rating_key) {
-                return Ok(item);
-            }
-        }
-    }
-
-    let Some(cancel) = manager.try_begin(&rating_key) else {
-        if let Some(item) = downloads::get_download(&rating_key)? {
-            return Ok(item);
-        }
-        return Ok(DownloadItem {
-            rating_key,
-            server_id,
-            title: "Downloading…".into(),
-            author: None,
-            series: None,
-            series_index: None,
-            status: "downloading".into(),
-            progress: 0.0,
-            error: None,
-            tracks_done: 0,
-            track_count: 0,
-            bytes_downloaded: 0,
-            bytes_total: None,
-            bytes_on_disk: 0,
-            duration_ms: None,
-            cover_path: None,
-            downloaded_at: None,
-            file_names: vec![],
-        });
-    };
-
-    let mgr = manager.inner().clone();
-    let app2 = app.clone();
-    let sid = server_id.clone();
-    let rk = rating_key.clone();
-
-    // Detach long-running work so the IPC call returns immediately.
-    tauri::async_runtime::spawn(async move {
-        if let Err(e) = downloads::run_download(app2, mgr, cancel, sid, rk.clone()).await {
-            eprintln!("download {rk} failed: {e}");
-        }
-    });
-
-    // Optimistic UI state until the first download-progress event arrives
-    Ok(DownloadItem {
-        rating_key,
-        server_id,
-        title: "Downloading…".into(),
-        author: None,
-        series: None,
-        series_index: None,
-        status: "queued".into(),
-        progress: 0.0,
-        error: None,
-        tracks_done: 0,
-        track_count: 0,
-        bytes_downloaded: 0,
-        bytes_total: None,
-        bytes_on_disk: 0,
-        duration_ms: None,
-        cover_path: None,
-        downloaded_at: None,
-        file_names: vec![],
-    })
+    downloads::enqueue(&app, manager.inner(), server_id, rating_key)
 }
 
+/// Cancel one queued/active item (keeps complete downloads untouched if not active).
 #[tauri::command]
 pub fn download_cancel(
+    app: AppHandle,
     manager: State<'_, Arc<DownloadManager>>,
     rating_key: String,
 ) -> AppResult<()> {
-    manager.request_cancel(&rating_key);
-    Ok(())
+    downloads::cancel_item(&app, manager.inner(), &rating_key)
+}
+
+/// Pause the entire download queue (partials kept for resume).
+#[tauri::command]
+pub fn download_pause_queue(
+    app: AppHandle,
+    manager: State<'_, Arc<DownloadManager>>,
+) -> AppResult<QueueState> {
+    downloads::pause_queue(&app, manager.inner())
+}
+
+/// Resume the queue and continue interrupted / paused jobs.
+#[tauri::command]
+pub fn download_resume_queue(
+    app: AppHandle,
+    manager: State<'_, Arc<DownloadManager>>,
+) -> AppResult<QueueState> {
+    if !crate::plex::is_authenticated() {
+        return Err(crate::error::AppError::NotAuthenticated);
+    }
+    downloads::resume_queue(&app, manager.inner())
+}
+
+/// Queue totals + pause flag (also emitted as `download-queue` events).
+#[tauri::command]
+pub fn download_queue_state(
+    manager: State<'_, Arc<DownloadManager>>,
+) -> AppResult<QueueState> {
+    Ok(downloads::queue_state(manager.inner()))
+}
+
+/// Cold-start restore: heal interrupted jobs; auto-resume if the queue was active.
+#[tauri::command]
+pub fn download_restore(
+    app: AppHandle,
+    manager: State<'_, Arc<DownloadManager>>,
+) -> AppResult<QueueState> {
+    downloads::restore_queue(&app, manager.inner())
 }
 
 #[tauri::command]
 pub fn download_remove(
+    app: AppHandle,
     manager: State<'_, Arc<DownloadManager>>,
     rating_key: String,
 ) -> AppResult<()> {
-    manager.request_cancel(&rating_key);
-    downloads::remove_download(&rating_key)
+    downloads::remove_item(&app, manager.inner(), &rating_key)
 }
 
 /// Delete all offline audiobook folders. Returns how many book folders were removed.
 #[tauri::command]
-pub fn download_remove_all(manager: State<'_, Arc<DownloadManager>>) -> AppResult<u32> {
-    // Best-effort: cancel any active jobs first by listing known keys
-    if let Ok(items) = downloads::list_downloads() {
-        for item in items {
-            manager.request_cancel(&item.rating_key);
-        }
-    }
-    downloads::remove_all_downloads()
+pub fn download_remove_all(
+    app: AppHandle,
+    manager: State<'_, Arc<DownloadManager>>,
+) -> AppResult<u32> {
+    downloads::remove_all_items(&app, manager.inner())
 }
 
 /// Total disk bytes used by offline downloads.
@@ -140,4 +115,20 @@ pub fn download_storage_bytes() -> AppResult<u64> {
 #[tauri::command]
 pub fn download_local_playback(rating_key: String) -> AppResult<Option<LocalPlayback>> {
     downloads::local_playback(&rating_key)
+}
+
+/// True when offline files are ready for HTML5 playback (MP3 or already web-safe).
+#[tauri::command]
+pub fn download_playable_ready(rating_key: String) -> AppResult<bool> {
+    Ok(downloads::playable_ready(&rating_key))
+}
+
+/// Ensure WebKit-safe MP3 sidecars exist (ffmpeg). Can take a while for long books.
+#[tauri::command]
+pub async fn download_ensure_playable(rating_key: String) -> AppResult<downloads::DownloadItem> {
+    let rk = rating_key.clone();
+    let item = tauri::async_runtime::spawn_blocking(move || downloads::ensure_playable(&rk))
+        .await
+        .map_err(|e| crate::error::AppError::Message(format!("ensure_playable task: {e}")))??;
+    Ok(item)
 }
